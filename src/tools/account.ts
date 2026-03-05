@@ -1,0 +1,677 @@
+import { z } from 'zod';
+import { parseEther, parseUnits } from 'viem';
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { AZETH_CONTRACTS, ERC8004_REGISTRY, TOKENS, formatTokenAmount } from '@azeth/common';
+import { TrustRegistryModuleAbi } from '@azeth/common/abis';
+import { createClient, resolveChain, validateAddress } from '../utils/client.js';
+import { resolveSmartAccount } from '../utils/resolve.js';
+import { success, error, handleError, guardianRequiredError } from '../utils/response.js';
+
+/** Minimal ABI for ERC-8004 Identity Registry tokenURI (external contract, not in generated ABIs) */
+const ERC8004_TOKEN_URI_ABI = [
+  {
+    type: 'function' as const,
+    name: 'tokenURI',
+    inputs: [{ name: 'tokenId', type: 'uint256', internalType: 'uint256' }],
+    outputs: [{ name: '', type: 'string', internalType: 'string' }],
+    stateMutability: 'view' as const,
+  },
+] as const;
+
+/** Parse an ERC-8004 data: URI to extract agent metadata (name + entityType).
+ *  URI format: data:application/json,{encoded JSON with name/entityType fields}
+ */
+function parseAgentMetadata(uri: string): { name: string; entityType: string } {
+  try {
+    if (!uri.startsWith('data:application/json,')) return { name: '(unknown)', entityType: 'agent' };
+    const jsonStr = decodeURIComponent(uri.slice('data:application/json,'.length));
+    const metadata = JSON.parse(jsonStr) as { name?: string; entityType?: string };
+    return {
+      name: metadata.name ?? '(unknown)',
+      entityType: metadata.entityType ?? 'agent',
+    };
+  } catch {
+    return { name: '(unknown)', entityType: 'agent' };
+  }
+}
+
+/** Register account-related MCP tools: azeth_create_account, azeth_balance, azeth_history, azeth_deposit, azeth_accounts */
+export function registerAccountTools(server: McpServer): void {
+  // ──────────────────────────────────────────────
+  // azeth_create_account
+  // ──────────────────────────────────────────────
+  server.registerTool(
+    'azeth_create_account',
+    {
+      description: [
+        'Deploy a new Azeth smart account with guardian guardrails and register it on the ERC-8004 trust registry.',
+        '',
+        'Use this when: An AI agent or service needs its own on-chain identity with spending limits and trust registry presence.',
+        'One EOA can own multiple smart accounts.',
+        '',
+        'Single atomic transaction: deploys smart account proxy, installs all 4 modules (Guardian, TrustRegistry,',
+        'PaymentAgreement, Reputation), registers on ERC-8004, and permanently revokes factory access.',
+        '',
+        'Returns: The deployed smart account address, trust registry token ID, and transaction hash.',
+        '',
+        'Guardian: By default, the guardian is derived from AZETH_GUARDIAN_KEY env var. If not set, falls back to self-guardian (owner address).',
+        'For production, always use a separate guardian key. Set AZETH_GUARDIAN_KEY in your .env file.',
+        '',
+        'Note: This is a state-changing operation that deploys contracts on-chain. It requires ETH for gas.',
+        'The owner private key is read from the AZETH_PRIVATE_KEY environment variable.',
+        '',
+        'Example: { "name": "PriceFeedBot", "entityType": "service", "description": "Real-time crypto price data", "capabilities": ["price-feed", "market-data"] }',
+      ].join('\n'),
+      inputSchema: z.object({
+        chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
+        name: z.string().min(1).max(256).describe('Display name for this participant in the trust registry.'),
+        entityType: z.enum(['agent', 'service', 'infrastructure']).describe('Participant type: "agent" (AI agent), "service" (API/oracle), or "infrastructure" (bridge/relay).'),
+        description: z.string().min(1).max(2048).describe('Human-readable description of what this participant does.'),
+        capabilities: z.preprocess(
+          (val) => typeof val === 'string' ? JSON.parse(val) : val,
+          z.array(z.string().max(128)).min(1).max(50),
+        ).describe('List of capabilities this participant offers (e.g., ["swap", "price-feed", "translation"]).'),
+        endpoint: z.string().url().max(2048)
+          .optional()
+          .describe('Optional HTTP endpoint (http:// or https://) where this participant can be reached.'),
+        maxTxAmountUSD: z.coerce.number().positive().optional()
+          .describe('Max USD per transaction (default: $100 testnet, $50 mainnet).'),
+        dailySpendLimitUSD: z.coerce.number().positive().optional()
+          .describe('Max USD per day (default: $1000 testnet, $500 mainnet).'),
+        guardian: z.string().optional().describe(
+          'Guardian address for co-signing operations that exceed spending limits. ' +
+          'If omitted, derived from AZETH_GUARDIAN_KEY env var. ' +
+          'If neither is set, defaults to the owner address (self-guardian, NOT recommended for production).',
+        ),
+        emergencyWithdrawTo: z.string().optional().describe(
+          'Address where funds are sent during emergency withdrawal. ' +
+          'Defaults to the owner EOA address (derived from AZETH_PRIVATE_KEY). ' +
+          'Must be a trusted address you control — this is your recovery destination.',
+        ),
+      }),
+    },
+    async (args) => {
+      // Runtime validation for endpoint protocol (replaces .refine() which breaks MCP JSON Schema)
+      if (args.endpoint && !args.endpoint.startsWith('http://') && !args.endpoint.startsWith('https://')) {
+        return error('INVALID_INPUT', 'Endpoint must use HTTP or HTTPS protocol.');
+      }
+
+      let client;
+      try {
+        client = await createClient(args.chain);
+
+        // Default guardrails: conservative limits
+        const isTestnet = resolveChain(args.chain) === 'baseSepolia';
+        const maxTxUSD = args.maxTxAmountUSD ?? (isTestnet ? 100 : 50);
+        const dailyUSD = args.dailySpendLimitUSD ?? (isTestnet ? 1000 : 500);
+
+        // Resolve guardian address: explicit param > AZETH_GUARDIAN_KEY env > self-guardian (owner)
+        let guardianAddress: `0x${string}` = client.address; // fallback: self-guardian
+        let guardianSource = 'self (owner EOA)';
+
+        if (args.guardian) {
+          // Explicit guardian address provided
+          if (!validateAddress(args.guardian)) {
+            return error('INVALID_INPUT', `Invalid guardian address: "${args.guardian}".`, 'Must be 0x-prefixed followed by 40 hex characters.');
+          }
+          guardianAddress = args.guardian as `0x${string}`;
+          guardianSource = 'explicit parameter';
+        } else {
+          // Try deriving from AZETH_GUARDIAN_KEY env var
+          const guardianKey = process.env['AZETH_GUARDIAN_KEY'];
+          if (guardianKey && /^0x[0-9a-fA-F]{64}$/.test(guardianKey.trim())) {
+            const { privateKeyToAccount } = await import('viem/accounts');
+            const guardianAccount = privateKeyToAccount(guardianKey.trim() as `0x${string}`);
+            guardianAddress = guardianAccount.address;
+            guardianSource = 'AZETH_GUARDIAN_KEY env var';
+          }
+        }
+
+        // Resolve emergencyWithdrawTo: explicit param > AZETH_EMERGENCY_ADDRESS env > owner EOA
+        let emergencyAddress: `0x${string}` = client.address;
+        if (args.emergencyWithdrawTo) {
+          if (!validateAddress(args.emergencyWithdrawTo)) {
+            return error('INVALID_INPUT', `Invalid emergencyWithdrawTo address: "${args.emergencyWithdrawTo}".`, 'Must be 0x-prefixed followed by 40 hex characters.');
+          }
+          emergencyAddress = args.emergencyWithdrawTo as `0x${string}`;
+        } else {
+          const envEmergency = process.env['AZETH_EMERGENCY_ADDRESS'];
+          if (envEmergency && validateAddress(envEmergency)) {
+            emergencyAddress = envEmergency as `0x${string}`;
+          }
+        }
+
+        // Default token whitelist: ETH + USDC + WETH so that payment agreements
+        // and other executor-module operations work out of the box.
+        const chain = resolveChain(args.chain);
+        const defaultTokens: `0x${string}`[] = [
+          '0x0000000000000000000000000000000000000000',
+          TOKENS[chain].USDC,
+          TOKENS[chain].WETH,
+        ];
+
+        const result = await client.createAccount({
+          owner: client.address,
+          guardrails: {
+            maxTxAmountUSD: BigInt(Math.round(maxTxUSD)) * 10n ** 18n,
+            dailySpendLimitUSD: BigInt(Math.round(dailyUSD)) * 10n ** 18n,
+            guardianMaxTxAmountUSD: BigInt(Math.round(maxTxUSD * 5)) * 10n ** 18n,
+            guardianDailySpendLimitUSD: BigInt(Math.round(dailyUSD * 5)) * 10n ** 18n,
+            guardian: guardianAddress,
+            emergencyWithdrawTo: emergencyAddress,
+          },
+          tokens: defaultTokens,
+          registry: {
+            name: args.name,
+            description: args.description,
+            entityType: args.entityType,
+            capabilities: args.capabilities,
+            endpoint: args.endpoint,
+          },
+        });
+
+        return success(
+          {
+            account: result.account,
+            tokenId: result.tokenId.toString(),
+            txHash: result.txHash,
+            guardian: guardianAddress,
+            guardianSource,
+            emergencyWithdrawTo: emergencyAddress,
+            ...(guardianAddress === client.address ? {
+              warning: 'Guardian is set to the owner address (self-guardian). This means guardian co-signatures use the same key as the owner, providing no additional security. For production, set AZETH_GUARDIAN_KEY in your environment or provide a separate guardian address.',
+            } : {}),
+          },
+          { txHash: result.txHash },
+        );
+      } catch (err) {
+        return handleError(err);
+      } finally {
+        try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }
+      }
+    },
+  );
+
+  // ──────────────────────────────────────────────
+  // azeth_balance
+  // ──────────────────────────────────────────────
+  server.registerTool(
+    'azeth_balance',
+    {
+      description: [
+        'Check all balances with USD values for your EOA and all Azeth smart accounts.',
+        '',
+        'Use this when: You need to know how much ETH, USDC, or WETH your accounts hold,',
+        'or you want a total portfolio value in USD before making a transfer or payment.',
+        '',
+        'Returns: Multi-account breakdown with per-token USD values and grand total.',
+        'EOA is shown first (index 0), followed by smart accounts in deployment order.',
+        '',
+        'Optionally filter to a single smart account by providing its address.',
+        '',
+        'Note: This is a read-only, single-RPC-call operation and safe to call repeatedly.',
+        'The owner is determined by the AZETH_PRIVATE_KEY environment variable.',
+        '',
+        'Example: {} or { "smartAccount": "#1" }',
+      ].join('\n'),
+      inputSchema: z.object({
+        chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
+        smartAccount: z.string().optional().describe('Smart account address, name, or "#N" (account index). If omitted, shows all accounts.'),
+      }),
+    },
+    async (args) => {
+      let client;
+      try {
+        client = await createClient(args.chain);
+
+        // Resolve smartAccount: address, name, "#N", or undefined
+        let targetAddress: `0x${string}` | undefined;
+        if (args.smartAccount) {
+          try {
+            targetAddress = await resolveSmartAccount(args.smartAccount, client);
+          } catch (resolveErr) {
+            return handleError(resolveErr);
+          }
+        }
+
+        const allBalances = await client.getAllBalances();
+
+        let accounts = allBalances.accounts;
+        if (targetAddress) {
+          const target = targetAddress.toLowerCase();
+          accounts = accounts.filter((ab) => ab.account.toLowerCase() === target);
+        }
+
+        // Enrich smart account labels with names from the trust registry.
+        // Skip index 0 (EOA). Non-fatal: falls back to default label on any failure.
+        const chain = resolveChain(args.chain);
+        const trustRegistryAddr = AZETH_CONTRACTS[chain].trustRegistryModule;
+        const identityRegistryAddr = ERC8004_REGISTRY[chain];
+        for (let i = 0; i < accounts.length; i++) {
+          const ab = accounts[i]!;
+          // EOA label is always "EOA Wallet" — skip
+          if (i === 0 && !targetAddress) continue;
+          try {
+            const tokenId = await client.publicClient.readContract({
+              address: trustRegistryAddr,
+              abi: TrustRegistryModuleAbi,
+              functionName: 'getTokenId',
+              args: [ab.account as `0x${string}`],
+            });
+            if (tokenId > 0n) {
+              const uri = await client.publicClient.readContract({
+                address: identityRegistryAddr,
+                abi: ERC8004_TOKEN_URI_ABI,
+                functionName: 'tokenURI',
+                args: [tokenId],
+              });
+              const name = parseAgentMetadata(uri).name;
+              if (name !== '(unknown)') {
+                // Extract the #N index from the existing label if present
+                const indexMatch = ab.label.match(/#(\d+)/);
+                ab.label = indexMatch ? `${name} (#${indexMatch[1]})` : name;
+              }
+            }
+          } catch {
+            // Non-fatal — keep existing label
+          }
+        }
+
+        return success({
+          owner: client.address,
+          grandTotalUSD: allBalances.grandTotalUSDFormatted,
+          accounts: accounts.map((ab) => ({
+            account: ab.account,
+            label: ab.label,
+            totalUSD: ab.totalUSDFormatted,
+            balances: ab.balances.map((tb) => ({
+              token: tb.symbol,
+              balance: tb.balanceFormatted,
+              usdValue: tb.usdFormatted,
+            })),
+          })),
+        });
+      } catch (err) {
+        return handleError(err);
+      } finally {
+        try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }
+      }
+    },
+  );
+
+  // ──────────────────────────────────────────────
+  // azeth_history
+  // ──────────────────────────────────────────────
+  server.registerTool(
+    'azeth_history',
+    {
+      description: [
+        'Get recent transaction history for your Azeth smart account.',
+        '',
+        'Use this when: You need to review past transactions, verify a payment was sent, or audit account activity.',
+        '',
+        'Returns: Array of transaction records with hash, from, to, value, block number, and timestamp.',
+        '',
+        'Note: Full indexed history requires the Azeth server to be running. Returns empty results if the server is unavailable.',
+        'The account is determined by the AZETH_PRIVATE_KEY environment variable.',
+        '',
+        'Example: { "limit": 5 } or { "smartAccount": "#2", "limit": 20 }',
+      ].join('\n'),
+      inputSchema: z.object({
+        chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
+        limit: z.coerce.number().int().min(1).max(100).optional().describe('Maximum number of transactions to return. Defaults to 10.'),
+        smartAccount: z.string().optional().describe('Smart account address, name, or "#N" (account index). If omitted, uses your first smart account.'),
+      }),
+    },
+    async (args) => {
+      let client;
+      try {
+        client = await createClient(args.chain);
+
+        // Resolve smartAccount: address, name, "#N", or undefined
+        let forAccount: `0x${string}` | undefined;
+        if (args.smartAccount) {
+          try {
+            forAccount = await resolveSmartAccount(args.smartAccount, client);
+          } catch (resolveErr) {
+            return handleError(resolveErr);
+          }
+        }
+
+        const history = await client.getHistory({ limit: args.limit ?? 10 }, forAccount);
+
+        // Resolve token symbols and decimals for formatting
+        const chain = resolveChain(args.chain);
+        const tokens = TOKENS[chain];
+        const ZERO_ADDR = '0x0000000000000000000000000000000000000000';
+
+        return success({
+          smartAccount: client.smartAccount ?? 'not-deployed',
+          transactions: history.map((tx) => {
+            // Determine token symbol and decimals for formatting
+            const tokenAddr = tx.token?.toLowerCase() ?? null;
+            let symbol = 'ETH';
+            let decimals = 18;
+            if (tokenAddr && tokenAddr !== ZERO_ADDR) {
+              if (tokenAddr === tokens.USDC.toLowerCase()) {
+                symbol = 'USDC';
+                decimals = 6;
+              } else if (tokenAddr === tokens.WETH.toLowerCase()) {
+                symbol = 'WETH';
+                decimals = 18;
+              } else {
+                symbol = 'TOKEN';
+              }
+            }
+
+            const valueFormatted = `${formatTokenAmount(tx.value, decimals, decimals === 6 ? 2 : 6)} ${symbol}`;
+            const timestampISO = tx.timestamp > 0
+              ? new Date(tx.timestamp * 1000).toISOString()
+              : null;
+
+            return {
+              hash: tx.hash,
+              from: tx.from,
+              to: tx.to,
+              value: tx.value.toString(),
+              valueFormatted,
+              token: tx.token ?? ZERO_ADDR,
+              tokenSymbol: symbol,
+              blockNumber: tx.blockNumber.toString(),
+              timestamp: tx.timestamp,
+              timestampISO,
+            };
+          }),
+        });
+      } catch (err) {
+        return handleError(err);
+      } finally {
+        try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }
+      }
+    },
+  );
+
+  // ──────────────────────────────────────────────
+  // azeth_deposit
+  // ──────────────────────────────────────────────
+  server.registerTool(
+    'azeth_deposit',
+    {
+      description: [
+        'Deposit ETH or ERC-20 tokens from your EOA wallet into your own Azeth smart account.',
+        '',
+        'Use this when: Your smart account needs funding for transfers, x402 payments, or other operations.',
+        '',
+        'SECURITY: This verifies ON-CHAIN that the target is a real Azeth smart account owned by you.',
+        'You cannot deposit to someone else\'s smart account.',
+        '',
+        'Returns: Transaction hash and deposit details.',
+        '',
+        'Note: If no target account is specified, deposits to your first smart account.',
+        'For ETH deposits, omit the token parameter. For ERC-20 tokens, provide the token contract address AND decimals.',
+        'The amount is in human-readable units (e.g., "0.01" for 0.01 ETH, "100" for 100 USDC).',
+        '',
+        'Example: { "amount": "0.01" } or { "amount": "50", "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "decimals": 6 }',
+      ].join('\n'),
+      inputSchema: z.object({
+        chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
+        amount: z.string().describe('Amount to deposit in human-readable units (e.g., "0.01" for 0.01 ETH).'),
+        token: z.string().optional().describe('ERC-20 token contract address. Omit for native ETH deposit.'),
+        decimals: z.coerce.number().int().min(0).max(18).optional()
+          .describe('Token decimals for ERC-20 deposits. REQUIRED when token is specified. Use 6 for USDC, 18 for WETH.'),
+        smartAccount: z.string().optional()
+          .describe('Target smart account address, name, or "#N" (account index). If omitted, deposits to your first Azeth account.'),
+      }),
+    },
+    async (args) => {
+      if (args.token && !validateAddress(args.token)) {
+        return error('INVALID_INPUT', `Invalid token address: "${args.token}".`, 'Must be 0x-prefixed followed by 40 hex characters.');
+      }
+      if (args.token && args.decimals === undefined) {
+        return error('INVALID_INPUT', 'decimals is required when token address is provided.', 'Use 6 for USDC, 18 for WETH.');
+      }
+
+      let client;
+      try {
+        client = await createClient(args.chain);
+
+        let target: `0x${string}`;
+        if (args.smartAccount) {
+          try {
+            target = (await resolveSmartAccount(args.smartAccount, client))!;
+          } catch (resolveErr) {
+            return handleError(resolveErr);
+          }
+        } else {
+          target = await client.resolveSmartAccount();
+        }
+
+        const decimals = args.decimals ?? 18;
+        let amount: bigint;
+        try {
+          amount = args.token ? parseUnits(args.amount, decimals) : parseEther(args.amount);
+        } catch {
+          return error('INVALID_INPUT', 'Invalid amount format — must be a valid decimal number.');
+        }
+
+        const result = await client.deposit({
+          to: target,
+          amount,
+          token: args.token as `0x${string}` | undefined,
+        });
+
+        return success(
+          {
+            txHash: result.txHash,
+            from: result.from,
+            to: result.to,
+            amount: args.amount,
+            token: result.token,
+          },
+          { txHash: result.txHash },
+        );
+      } catch (err) {
+        return handleError(err);
+      } finally {
+        try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }
+      }
+    },
+  );
+
+  // ──────────────────────────────────────────────
+  // azeth_accounts
+  // ──────────────────────────────────────────────
+  server.registerTool(
+    'azeth_accounts',
+    {
+      description: [
+        'List all your Azeth smart accounts with their names, addresses, and trust registry token IDs.',
+        '',
+        'Use this when: You want to see all your accounts at a glance, find an account by name,',
+        'or get the "#N" index for use in other tools.',
+        '',
+        'Returns: Your EOA owner address and an indexed list of smart accounts.',
+        'Each account shows its #N index (usable in other tools), name, address, and tokenId.',
+        '',
+        'Note: This is a read-only operation. Names come from the trust registry.',
+        'The owner is determined by the AZETH_PRIVATE_KEY environment variable.',
+      ].join('\n'),
+      inputSchema: z.object({
+        chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
+      }),
+    },
+    async (args) => {
+      let client;
+      try {
+        client = await createClient(args.chain);
+        const accounts = await client.getSmartAccounts();
+
+        if (accounts.length === 0) {
+          return success({
+            owner: client.address,
+            accounts: [],
+            message: 'No smart accounts found. Use azeth_create_account to create one.',
+          });
+        }
+
+        // Look up name and tokenId for each account on-chain via TrustRegistryModule + ERC-8004
+        const chain = resolveChain(args.chain);
+        const trustRegistryAddr = AZETH_CONTRACTS[chain].trustRegistryModule;
+        const identityRegistryAddr = ERC8004_REGISTRY[chain];
+
+        const accountDetails: Array<{
+          index: number;
+          address: string;
+          name: string;
+          entityType: string;
+          tokenId: string;
+        }> = [];
+
+        for (let i = 0; i < accounts.length; i++) {
+          const addr = accounts[i]!;
+          let name = '(unregistered)';
+          let entityType = 'agent';
+          let tokenIdStr = '(none)';
+
+          try {
+            // Step 1: Get tokenId from TrustRegistryModule (on-chain)
+            const tokenId = await client.publicClient.readContract({
+              address: trustRegistryAddr,
+              abi: TrustRegistryModuleAbi,
+              functionName: 'getTokenId',
+              args: [addr],
+            });
+
+            if (tokenId > 0n) {
+              tokenIdStr = tokenId.toString();
+
+              // Step 2: Get tokenURI from ERC-8004 Identity Registry (on-chain)
+              try {
+                const uri = await client.publicClient.readContract({
+                  address: identityRegistryAddr,
+                  abi: ERC8004_TOKEN_URI_ABI,
+                  functionName: 'tokenURI',
+                  args: [tokenId],
+                });
+                const meta = parseAgentMetadata(uri);
+                name = meta.name;
+                entityType = meta.entityType;
+              } catch {
+                // tokenURI call failed — token exists but URI unreadable
+                name = '(registered)';
+              }
+            }
+          } catch {
+            // getTokenId call failed — account not registered on this module
+          }
+
+          accountDetails.push({
+            index: i + 1,
+            address: addr,
+            name,
+            entityType,
+            tokenId: tokenIdStr,
+          });
+        }
+
+        return success({
+          owner: client.address,
+          accounts: accountDetails,
+        });
+      } catch (err) {
+        return handleError(err);
+      } finally {
+        try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }
+      }
+    },
+  );
+
+  // ──────────────────────────────────────────────
+  // azeth_whitelist_token
+  // ──────────────────────────────────────────────
+  server.registerTool(
+    'azeth_whitelist_token',
+    {
+      description: [
+        'Add or remove a token from your smart account\'s guardian whitelist.',
+        '',
+        'Use this when: You need to whitelist a new token for payment agreements or other executor-module operations.',
+        'Newly created accounts already have ETH, USDC, and WETH whitelisted by default.',
+        '',
+        'Why it matters: The GuardianModule enforces a token whitelist for automated operations',
+        '(payment agreements, swap execution). Owner-signed transfers bypass the whitelist,',
+        'but executor modules like PaymentAgreementModule require the token to be whitelisted.',
+        '',
+        'Returns: Transaction hash confirming the whitelist update.',
+        '',
+        'Note: Only the account owner can update their own whitelist.',
+        '',
+        'Example: { "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "allowed": true }',
+      ].join('\n'),
+      inputSchema: z.object({
+        chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
+        token: z.string().describe('Token contract address to whitelist/delist. Use "0x0000000000000000000000000000000000000000" for native ETH.'),
+        allowed: z.boolean().describe('true to whitelist the token, false to remove it from the whitelist.'),
+        smartAccount: z.string().optional().describe('Smart account address, name, or "#N". Defaults to first smart account.'),
+      }),
+    },
+    async (args) => {
+      if (!validateAddress(args.token)) {
+        return error('INVALID_INPUT', `Invalid token address: "${args.token}".`, 'Must be 0x-prefixed followed by 40 hex characters.');
+      }
+
+      let client;
+      try {
+        client = await createClient(args.chain);
+
+        let account: `0x${string}`;
+        if (args.smartAccount) {
+          try {
+            account = (await resolveSmartAccount(args.smartAccount, client))!;
+          } catch (resolveErr) {
+            return handleError(resolveErr);
+          }
+        } else {
+          account = await client.resolveSmartAccount();
+        }
+
+        const txHash = await client.setTokenWhitelist(
+          args.token as `0x${string}`,
+          args.allowed,
+          account,
+        );
+
+        const action = args.allowed ? 'whitelisted' : 'removed from whitelist';
+        // Resolve token symbol for display
+        const chain = resolveChain(args.chain);
+        const tokens = TOKENS[chain];
+        const tokenLower = args.token.toLowerCase();
+        let tokenSymbol = args.token.slice(0, 6) + '...' + args.token.slice(-4);
+        if (args.token === '0x0000000000000000000000000000000000000000') tokenSymbol = 'ETH';
+        else if (tokenLower === tokens.USDC.toLowerCase()) tokenSymbol = 'USDC';
+        else if (tokenLower === tokens.WETH.toLowerCase()) tokenSymbol = 'WETH';
+
+        return success(
+          {
+            token: args.token,
+            tokenSymbol,
+            allowed: args.allowed,
+            message: `${tokenSymbol} (${args.token}) ${action} on account ${account}.`,
+          },
+          { txHash },
+        );
+      } catch (err) {
+        // Detect AA24 signature validation failure — common for guardian-gated operations
+        if (err instanceof Error && /AA24/.test(err.message)) {
+          return guardianRequiredError(
+            'Token whitelisting requires guardian co-signature (guardrail-loosening change).',
+            { operation: 'whitelist_token' },
+          );
+        }
+        return handleError(err);
+      } finally {
+        try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }
+      }
+    },
+  );
+}

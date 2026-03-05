@@ -1,0 +1,60 @@
+{
+  "name": "@azeth/mcp-server",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "MCP server for the Azeth trust infrastructure — smart accounts, payments, reputation, and discovery tools for AI agents",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/azeth-protocol/mcp-server.git"
+  },
+  "homepage": "https://azeth.ai",
+  "keywords": [
+    "azeth",
+    "mcp",
+    "model-context-protocol",
+    "ai-agents",
+    "machine-economy",
+    "smart-accounts",
+    "x402",
+    "payments"
+  ],
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "bin": {
+    "azeth-mcp": "./dist/index.js"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc --project tsconfig.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@azeth/common": "^0.1.0",
+    "@azeth/sdk": "^0.1.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "dotenv": "^16.4.0",
+    "viem": "^2.21.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0",
+    "tsx": "^4.19.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
