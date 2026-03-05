@@ -2,6 +2,10 @@
 
 MCP (Model Context Protocol) server for Azeth -- the trust, discovery, and payment layer for the machine economy. Provides 32 tools for AI agents to create accounts, make payments, discover services, manage reputation, and communicate via XMTP.
 
+<a href="https://glama.ai/mcp/servers/@azeth-protocol/mcp-azeth">
+  <img width="380" height="200" src="https://glama.ai/mcp/servers/@azeth-protocol/mcp-azeth/badge" alt="mcp-azeth MCP server" />
+</a>
+
 ## Setup
 
 ### Claude Desktop
