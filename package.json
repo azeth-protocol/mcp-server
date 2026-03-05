@@ -35,12 +35,11 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "clean": "rm -rf dist",
-    "release": "pnpm build && changeset publish"
+    "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@azeth/common": "^0.1.0",
-    "@azeth/sdk": "^0.1.0",
+    "@azeth/common": "^0.2.0",
+    "@azeth/sdk": ">=0.1.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "dotenv": "^16.4.0",
     "viem": "^2.21.0",
@@ -50,8 +49,7 @@
     "@types/node": "^22.0.0",
     "typescript": "^5.7.0",
     "vitest": "^2.1.0",
-    "tsx": "^4.19.0",
-    "@changesets/cli": "^2.27.0"
+    "tsx": "^4.19.0"
   },
   "publishConfig": {
     "access": "public"
