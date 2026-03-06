@@ -170,14 +170,22 @@ export function registerAccountTools(server: McpServer): void {
           },
         });
 
+        const serverUrl = process.env['AZETH_SERVER_URL'] ?? 'https://api.azeth.ai';
+        const tokenIdStr = result.tokenId.toString();
+        const badgeUrl = `${serverUrl}/badge/${tokenIdStr}`;
+        const profileUrl = `https://azeth.ai/agent/${result.account}`;
+
         return success(
           {
             account: result.account,
-            tokenId: result.tokenId.toString(),
+            tokenId: tokenIdStr,
             txHash: result.txHash,
             guardian: guardianAddress,
             guardianSource,
             emergencyWithdrawTo: emergencyAddress,
+            badge: badgeUrl,
+            profile: profileUrl,
+            embedMarkdown: `[![Azeth Trust Badge](${badgeUrl})](${profileUrl})`,
             ...(guardianAddress === client.address ? {
               warning: 'Guardian is set to the owner address (self-guardian). This means guardian co-signatures use the same key as the owner, providing no additional security. For production, set AZETH_GUARDIAN_KEY in your environment or provide a separate guardian address.',
             } : {}),
@@ -519,6 +527,7 @@ export function registerAccountTools(server: McpServer): void {
         const trustRegistryAddr = AZETH_CONTRACTS[chain].trustRegistryModule;
         const identityRegistryAddr = ERC8004_REGISTRY[chain];
 
+        const serverUrl = process.env['AZETH_SERVER_URL'] ?? 'https://api.azeth.ai';
         const accountDetails: Array<{
           index: number;
           address: string;
@@ -571,6 +580,10 @@ export function registerAccountTools(server: McpServer): void {
             name,
             entityType,
             tokenId: tokenIdStr,
+            ...(tokenIdStr !== '(none)' ? {
+              badge: `${serverUrl}/badge/${tokenIdStr}`,
+              profile: `https://azeth.ai/agent/${addr}`,
+            } : {}),
           });
         }
 
