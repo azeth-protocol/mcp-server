@@ -2,7 +2,8 @@ import { z } from 'zod';
 import { hexToString } from 'viem';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { discoverServicesWithFallback, getRegistryEntry } from '@azeth/sdk';
-import { AZETH_CONTRACTS, ERC8004_REGISTRY, formatTokenAmount } from '@azeth/common';
+import { AZETH_CONTRACTS, ERC8004_REGISTRY, formatTokenAmount, CATALOG_MAX_ENTRIES, CATALOG_MAX_PATH_LENGTH } from '@azeth/common';
+import type { CatalogEntry, CatalogMethod } from '@azeth/common';
 import { TrustRegistryModuleAbi, ReputationModuleAbi } from '@azeth/common/abis';
 import { createClient, resolveChain, resolveViemChain, validateAddress } from '../utils/client.js';
 import { success, error, handleError } from '../utils/response.js';
@@ -41,8 +42,9 @@ const ERC8004_GET_METADATA_ABI = [{
   stateMutability: 'view' as const,
 }] as const;
 
-/** Metadata keys that can be updated via setMetadata and should overlay tokenURI values */
-const OVERLAY_METADATA_KEYS = ['endpoint', 'description', 'name', 'entityType', 'capabilities', 'pricing', 'catalog'];
+/** Metadata keys that can be updated via setMetadata and should overlay tokenURI values.
+ *  Note: "catalog" is NOT included — catalogs are off-chain and served from the provider's endpoint. */
+const OVERLAY_METADATA_KEYS = ['endpoint', 'description', 'name', 'entityType', 'capabilities', 'pricing'];
 
 /** Overlay per-key metadata updates from getMetadata() onto a parsed registry entry.
  *  The ERC-8004 tokenURI is immutable after minting, but individual keys can be updated
@@ -71,20 +73,39 @@ async function overlayMetadataUpdates(
   }));
 }
 
-/** Parse a raw catalog array from metadata */
-function parseCatalogFromMeta(raw: unknown): Array<{ name: string; path: string; pricing?: string; description?: string }> | undefined {
+/** Parse a raw catalog array from metadata into typed CatalogEntry objects */
+function parseCatalogFromMeta(raw: unknown): CatalogEntry[] | undefined {
   if (!Array.isArray(raw)) return undefined;
-  const entries: Array<{ name: string; path: string; pricing?: string; description?: string }> = [];
+  const entries: CatalogEntry[] = [];
   for (const item of raw) {
     if (typeof item !== 'object' || item === null) continue;
     const rec = item as Record<string, unknown>;
     if (typeof rec.name !== 'string' || typeof rec.path !== 'string') continue;
-    entries.push({
+    const entry: CatalogEntry = {
       name: rec.name,
       path: rec.path,
-      pricing: typeof rec.pricing === 'string' ? rec.pricing : undefined,
-      description: typeof rec.description === 'string' ? rec.description : undefined,
-    });
+    };
+    if (typeof rec.method === 'string') entry.method = rec.method as CatalogMethod;
+    if (typeof rec.description === 'string') entry.description = rec.description;
+    if (typeof rec.pricing === 'string') entry.pricing = rec.pricing;
+    if (typeof rec.mimeType === 'string') entry.mimeType = rec.mimeType;
+    if (Array.isArray(rec.capabilities)) {
+      entry.capabilities = rec.capabilities.filter((c): c is string => typeof c === 'string');
+    }
+    if (typeof rec.params === 'object' && rec.params !== null && !Array.isArray(rec.params)) {
+      entry.params = rec.params as Record<string, string>;
+    }
+    if (typeof rec.paid === 'boolean') entry.paid = rec.paid;
+    if (Array.isArray(rec.accepts)) {
+      entry.accepts = (rec.accepts as Array<Record<string, unknown>>)
+        .filter(a => typeof a.network === 'string' && typeof a.asset === 'string')
+        .map(a => ({
+          network: a.network as string,
+          asset: a.asset as `0x${string}`,
+          ...(typeof a.symbol === 'string' ? { symbol: a.symbol } : {}),
+        }));
+    }
+    entries.push(entry);
   }
   return entries.length > 0 ? entries : undefined;
 }
@@ -97,7 +118,7 @@ function parseRegistryDataURI(uri: string): {
   capabilities: string[];
   endpoint?: string;
   pricing?: string;
-  catalog?: Array<{ name: string; path: string; pricing?: string; description?: string }>;
+  catalog?: CatalogEntry[];
 } | null {
   try {
     if (!uri.startsWith('data:application/json,')) return null;
@@ -161,11 +182,21 @@ export function registerRegistryTools(server: McpServer): void {
           (val) => typeof val === 'string' ? JSON.parse(val) : val,
           z.array(z.object({
             name: z.string().min(1).max(256),
-            path: z.string().min(1).max(512),
-            pricing: z.string().max(256).optional(),
+            path: z.string().min(1).max(CATALOG_MAX_PATH_LENGTH),
+            method: z.enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']).optional(),
             description: z.string().max(1024).optional(),
-          })).max(20).optional(),
-        ).optional().describe('Service catalog for multi-service providers. Array of offerings, each with name, path (relative to base endpoint), optional pricing, and optional description.'),
+            pricing: z.string().max(256).optional(),
+            mimeType: z.string().max(128).optional(),
+            capabilities: z.array(z.string().max(128)).max(20).optional(),
+            params: z.record(z.string(), z.string().max(512)).optional(),
+            paid: z.boolean().optional(),
+            accepts: z.array(z.object({
+              network: z.string().min(1).max(64),
+              asset: z.string().regex(/^0x[0-9a-fA-F]{40}$/) as z.ZodType<`0x${string}`>,
+              symbol: z.string().max(16).optional(),
+            })).max(10).optional(),
+          })).max(CATALOG_MAX_ENTRIES).optional(),
+        ).optional().describe('Off-chain service catalog for multi-service providers. Included in initial registration as a snapshot; providers should serve their live catalog from their endpoint. Each entry: name, path, method (GET/POST/etc), description, pricing, capabilities, params, paid (default true), accepts (multi-chain payment methods).'),
       }),
     },
     async (args) => {
@@ -448,7 +479,7 @@ export function registerRegistryTools(server: McpServer): void {
         }
 
         // Try server API first
-        let entry: { tokenId: string | number; owner: string; name: string; description: string; entityType: string; capabilities: string[]; endpoint?: string; pricing?: string; catalog?: Array<{ name: string; path: string; pricing?: string; description?: string }>; active: boolean } | null = null;
+        let entry: { tokenId: string | number; owner: string; name: string; description: string; entityType: string; capabilities: string[]; endpoint?: string; pricing?: string; catalog?: CatalogEntry[]; active: boolean } | null = null;
         let source: 'server' | 'on-chain' = 'server';
 
         try {
@@ -575,9 +606,11 @@ export function registerRegistryTools(server: McpServer): void {
         'Use this when: You need to change your service endpoint, description, capabilities,',
         'or other metadata after initial registration with azeth_publish_service.',
         '',
-        'Supported metadata keys: "endpoint", "description", "capabilities", "name", "entityType", "pricing", "catalog".',
+        'Supported metadata keys: "endpoint", "description", "capabilities", "name", "entityType", "pricing".',
         'For capabilities, provide a JSON array string (e.g., \'["translation", "nlp"]\').',
-        'For catalog, provide a JSON array of objects: \'[{"name":"Chain Data","path":"/v1/chains","pricing":"$0.001/req"}]\'.',
+        '',
+        'Note: Catalogs are off-chain and served from your endpoint. Update your catalog by',
+        'updating the response at your endpoint, not via this tool.',
         '',
         'Returns: Confirmation with transaction hash.',
         '',
@@ -588,7 +621,7 @@ export function registerRegistryTools(server: McpServer): void {
       ].join('\n'),
       inputSchema: z.object({
         chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
-        key: z.enum(['endpoint', 'description', 'capabilities', 'name', 'entityType', 'pricing', 'catalog']).describe(
+        key: z.enum(['endpoint', 'description', 'capabilities', 'name', 'entityType', 'pricing']).describe(
           'Metadata key to update.',
         ),
         value: z.string().min(1).max(2048).describe(
@@ -628,9 +661,10 @@ export function registerRegistryTools(server: McpServer): void {
         'Use this when: You need to change several metadata fields at once (e.g., endpoint + description + capabilities).',
         'This is more gas-efficient than calling azeth_update_service multiple times.',
         '',
-        'Supported metadata keys: "endpoint", "description", "capabilities", "name", "entityType", "pricing", "catalog".',
+        'Supported metadata keys: "endpoint", "description", "capabilities", "name", "entityType", "pricing".',
         'For capabilities, provide a JSON array string (e.g., \'["translation", "nlp"]\').',
-        'For catalog, provide a JSON array of objects: \'[{"name":"Chain Data","path":"/v1/chains","pricing":"$0.001/req"}]\'.',
+        '',
+        'Note: Catalogs are off-chain. Update your catalog by updating your endpoint response.',
         '',
         'Returns: Confirmation with a single transaction hash for all updates.',
         '',
@@ -644,7 +678,7 @@ export function registerRegistryTools(server: McpServer): void {
         updates: z.preprocess(
           (val) => typeof val === 'string' ? JSON.parse(val) : val,
           z.array(z.object({
-            key: z.enum(['endpoint', 'description', 'capabilities', 'name', 'entityType', 'pricing', 'catalog']),
+            key: z.enum(['endpoint', 'description', 'capabilities', 'name', 'entityType', 'pricing']),
             value: z.string().min(1).max(2048),
           })).min(1).max(5),
         ).describe('Array of {key, value} pairs to update. Max 5 updates per batch.'),
