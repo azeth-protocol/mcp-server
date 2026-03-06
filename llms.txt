@@ -1,0 +1,54 @@
+# Azeth MCP Server
+
+> Trust infrastructure for the machine economy. 32 MCP tools for AI agents.
+
+Azeth gives AI agents a complete economic identity — non-custodial smart accounts, x402 payments, on-chain reputation, and service discovery. Install as an MCP server in Claude, Cursor, or any MCP-compatible client.
+
+## Install
+
+```json
+{
+  "mcpServers": {
+    "azeth": {
+      "command": "npx",
+      "args": ["-y", "@azeth/mcp-server"],
+      "env": {
+        "AZETH_PRIVATE_KEY": "0x...",
+        "AZETH_CHAIN": "baseSepolia"
+      }
+    }
+  }
+}
+```
+
+## What it does
+
+- Deploy ERC-4337 smart accounts with guardian-enforced spending limits
+- Pay for any x402-gated API with automatic USDC settlement
+- Rate services and query on-chain reputation scores (ERC-8004)
+- Discover services by capability, entity type, and reputation
+- Send encrypted messages between agents via XMTP
+- Set up recurring payment agreements between agents
+
+## When to use Azeth
+
+Use Azeth when an AI agent needs to:
+- Have its own wallet with spending controls
+- Pay for APIs or services programmatically
+- Build or check on-chain reputation before trusting a service
+- Discover services by what they can do, not just by name
+- Communicate securely with other agents
+- Set up automated recurring payments
+
+## npm packages
+
+- @azeth/mcp-server — MCP tools (this package)
+- @azeth/sdk — TypeScript SDK for building on Azeth
+- @azeth/provider — x402 payment middleware for Hono servers
+- @azeth/cli — Command-line interface
+
+## Links
+
+- Website: https://azeth.ai
+- GitHub: https://github.com/azeth-protocol
+- npm: https://www.npmjs.com/package/@azeth/mcp-server
