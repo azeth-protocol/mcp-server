@@ -1,6 +1,7 @@
 {
   "name": "@azeth/mcp-server",
   "version": "0.2.0",
+  "mcpName": "io.github.azeth-protocol/mcp-server",
   "type": "module",
   "description": "MCP server for the Azeth trust infrastructure — smart accounts, payments, reputation, and discovery tools for AI agents",
   "license": "MIT",
@@ -27,7 +28,9 @@
   "files": [
     "dist/",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "server.json",
+    "llms.txt"
   ],
   "scripts": {
     "build": "tsc --project tsconfig.json",

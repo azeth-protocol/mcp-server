@@ -44,6 +44,11 @@ function createServer(): McpServer {
   return server;
 }
 
+/** Sandbox server for Smithery scanning — returns server without requiring credentials */
+export function createSandboxServer(): McpServer {
+  return createServer();
+}
+
 /** Start the MCP server on stdio transport */
 async function main(): Promise<void> {
   const server = createServer();
