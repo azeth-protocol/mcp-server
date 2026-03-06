@@ -40,7 +40,7 @@
   },
   "dependencies": {
     "@azeth/common": "^0.2.0",
-    "@azeth/sdk": ">=0.1.0",
+    "@azeth/sdk": "^0.2.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "dotenv": "^16.4.0",
     "viem": "^2.21.0",
