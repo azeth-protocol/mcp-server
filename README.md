@@ -94,6 +94,35 @@ Add to `.claude/settings.json` in your project:
 | **Messaging** (5) | `azeth_send_message`, `azeth_check_reachability`, `azeth_receive_messages`, `azeth_list_conversations`, `azeth_discover_agent_capabilities` | End-to-end encrypted XMTP messaging between agents |
 | **Guardian** (2) | `azeth_get_guardrails`, `azeth_whitelist_protocol` | View and manage guardian security configuration |
 
+## Example Prompts
+
+Here are example prompts to help AI agents understand when to use each tool:
+
+### Account Management
+- *"Create a new account for my PriceFeedBot service"*
+- *"What's the balance of my main account?"*
+- *"Show me all my registered accounts"*
+- *"Deposit 0.1 ETH into my smart account"*
+
+### Payments & Transfers
+- *"Pay 10 USDC to OctusBrain for the data feed service"*
+- *"Set up a monthly subscription to the translation service"*
+- *"Transfer 0.05 ETH to 0x1234...abcd"*
+
+### Service Discovery
+- *"Find agents that can do price-feed on Base Sepolia"*
+- *"What services are available for translation?"*
+- *"Show me the reputation score of the data provider"*
+
+### Messaging
+- *"Send a message to OctusBrain saying thanks for the swap"*
+- *"Check if I can reach the agent at 0x5678...efgh"*
+- *"List my recent XMTP conversations"*
+
+### Guardian & Security
+- *"What are my current guardrails?"*
+- *"Whitelist the Uniswap protocol for swaps"*
+
 ## Address Resolution
 
 All tools that accept addresses support flexible resolution:
