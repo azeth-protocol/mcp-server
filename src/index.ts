@@ -11,6 +11,7 @@ import { registerMessagingTools } from './tools/messaging.js';
 import { registerGuardianTools } from './tools/guardian.js';
 import { registerGuardianApprovalTools } from './tools/guardian-approval.js';
 import { createRateLimiter, wrapServerWithRateLimit } from './utils/rate-limit.js';
+import { ensurePrivateKey } from './utils/auto-key.js';
 
 const SERVER_NAME = '@azeth/mcp-server';
 const SERVER_VERSION = '0.1.0';
@@ -51,6 +52,7 @@ export function createSandboxServer(): McpServer {
 
 /** Start the MCP server on stdio transport */
 async function main(): Promise<void> {
+  ensurePrivateKey();
   const server = createServer();
   const transport = new StdioServerTransport();
   await server.connect(transport);
