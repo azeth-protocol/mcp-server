@@ -12,6 +12,13 @@
 interface ErrorInfo {
   name: string;
   description: string;
+  suggestion?: string;
+}
+
+/** Decoded error with human-readable message and optional remediation suggestion */
+export interface DecodedError {
+  message: string;
+  suggestion?: string;
 }
 
 /** Pre-computed selector → error info */
@@ -38,18 +45,18 @@ const SELECTOR_MAP: Record<string, ErrorInfo | undefined> = {
   '0x0bbfcdcc': { name: 'NotTightening', description: 'Only tightening (reducing limits) can bypass the timelock.' },
   '0x6320ab2b': { name: 'NoPendingEmergency', description: 'No emergency withdrawal is pending.' },
   '0x4806710a': { name: 'ChangeAlreadyPending', description: 'A guardrail change is already pending.' },
-  '0x24831e77': { name: 'ExecutorSpendExceedsLimit', description: 'Payment amount exceeds the guardian daily spend limit.' },
+  '0x24831e77': { name: 'ExecutorSpendExceedsLimit', description: 'Payment amount exceeds the guardian daily spend limit.', suggestion: 'Check your limits with azeth_get_guardrails. Wait until tomorrow or increase the daily limit via the guardian.' },
 
   // PaymentAgreementModule
   '0x95a68634': { name: 'SelfAgreement', description: 'Cannot create a payment agreement with yourself.' },
-  '0xf84835a0': { name: 'TokenNotWhitelisted', description: 'The token is not in the guardian whitelist. Add it via setTokenWhitelist.' },
+  '0xf84835a0': { name: 'TokenNotWhitelisted', description: 'The token is not in the guardian whitelist.', suggestion: 'Use azeth_whitelist_token to add the token to your guardian whitelist before retrying.' },
   '0xb5c6c3ab': { name: 'AgreementNotExists', description: 'The specified agreement does not exist.' },
   '0xfe1da89a': { name: 'InvalidAgreement', description: 'The agreement is invalid (already cancelled or completed).' },
-  '0x9563bcf0': { name: 'GuardianLimitExceeded', description: 'The payment exceeds guardian spending limits.' },
+  '0x9563bcf0': { name: 'GuardianLimitExceeded', description: 'The payment exceeds guardian spending limits.', suggestion: 'Check your limits with azeth_get_guardrails. Split into smaller amounts or increase limits via the guardian.' },
   '0x90b8ec18': { name: 'TransferFailed', description: 'The token transfer failed.' },
 
   // ReputationModule
-  '0xae525b83': { name: 'InsufficientPaymentUSD', description: 'You must pay at least $1 USD to the target before rating. Use azeth_get_net_paid to check your payment history.' },
+  '0xae525b83': { name: 'InsufficientPaymentUSD', description: 'You must pay at least $1 USD to the target before rating.', suggestion: 'Payments via azeth_pay, azeth_smart_pay, azeth_transfer, and payment agreements all count toward the $1 minimum. Use azeth_get_net_paid to check your payment history.' },
   '0xcb02f599': { name: 'SelfRatingNotAllowed', description: 'You cannot rate yourself.' },
   '0x645c0b06': { name: 'SiblingRatingNotAllowed', description: 'You cannot rate accounts owned by the same EOA.' },
   '0x565c8a5a': { name: 'InvalidValueDecimals', description: 'Value decimals must be between 0 and 18.' },
@@ -69,7 +76,7 @@ const SELECTOR_MAP: Record<string, ErrorInfo | undefined> = {
   // Oracle
   '0x1f8f95a0': { name: 'InvalidOraclePrice', description: 'The oracle returned an invalid price.' },
   '0xbf16aab6': { name: 'UnsupportedToken', description: 'The oracle does not support this token.' },
-  '0xcf479181': { name: 'InsufficientBalance', description: 'The smart account has insufficient token balance for this operation.' },
+  '0xf4d678b8': { name: 'InsufficientBalance', description: 'The smart account has insufficient token balance for this operation.', suggestion: 'Use azeth_deposit to fund your smart account, or use the smartAccount parameter to select a different account. Run azeth_accounts to see all your accounts and their balances.' },
 
   // Common (shared across multiple contracts)
   '0x0dc149f0': { name: 'AlreadyInitialized', description: 'This module is already initialized for the account.' },
@@ -93,7 +100,7 @@ const PANIC_SELECTOR = '4e487b71';         // Panic(uint256)
  *     selector is buried inside the hex at a 32-byte ABI boundary.
  *  4. Error(string) decoding: extracts the revert string from standard Solidity reverts
  */
-export function decodeErrorSelector(message: string): string | undefined {
+export function decodeErrorSelector(message: string): DecodedError | undefined {
   const hexMatches = message.matchAll(/0x([0-9a-fA-F]{8,})/g);
   for (const match of hexMatches) {
     const hexData = match[1]!.toLowerCase();
@@ -101,11 +108,11 @@ export function decodeErrorSelector(message: string): string | undefined {
     // Pass 1: Check the outer selector (first 8 chars)
     const outerSelector = `0x${hexData.slice(0, 8)}`;
     const outerKnown = SELECTOR_MAP[outerSelector];
-    if (outerKnown) return `${outerKnown.name}: ${outerKnown.description}`;
+    if (outerKnown) return { message: `${outerKnown.name}: ${outerKnown.description}`, suggestion: outerKnown.suggestion };
 
     // Pass 1b: Try to decode Error(string) at the outer level
     const outerString = tryDecodeErrorString(hexData);
-    if (outerString) return outerString;
+    if (outerString) return { message: outerString };
 
     // Pass 2: Scan interior at 64-char (32-byte) ABI word boundaries for known
     // selectors. ERC-4337 EntryPoint wraps inner reverts in FailedOpWithRevert
@@ -113,11 +120,11 @@ export function decodeErrorSelector(message: string): string | undefined {
     for (let i = 64; i + 8 <= hexData.length; i += 64) {
       const innerSelector = `0x${hexData.slice(i, i + 8)}`;
       const innerKnown = SELECTOR_MAP[innerSelector];
-      if (innerKnown) return `${innerKnown.name}: ${innerKnown.description}`;
+      if (innerKnown) return { message: `${innerKnown.name}: ${innerKnown.description}`, suggestion: innerKnown.suggestion };
 
       // Try to decode inner Error(string) — common in EntryPoint FailedOpWithRevert
       const innerString = tryDecodeErrorString(hexData.slice(i));
-      if (innerString) return innerString;
+      if (innerString) return { message: innerString };
     }
   }
   return undefined;

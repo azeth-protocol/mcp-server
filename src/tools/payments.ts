@@ -3,7 +3,9 @@ import { URL } from 'node:url';
 import dns from 'node:dns/promises';
 import { isAddress, parseUnits } from 'viem';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AzethError, AZETH_CONTRACTS, TOKENS, formatTokenAmount } from '@azeth/common';
+import type { AzethKit } from '@azeth/sdk';
 import { createClient, resolveChain, validateAddress } from '../utils/client.js';
 import { resolveAddress } from '../utils/resolve.js';
 import { success, error, handleError, guardianRequiredError } from '../utils/response.js';
@@ -175,6 +177,45 @@ async function validateExternalUrl(urlStr: string): Promise<ValidatedUrl> {
   return { url: urlStr, pinnedIPv4 };
 }
 
+/**
+ * Apply smart account selection from the `smartAccount` tool parameter.
+ * Accepts "#N" (1-based index from azeth_accounts) or a full address.
+ * Returns a CallToolResult error if resolution fails, or null on success.
+ */
+function applySmartAccountSelection(client: AzethKit, smartAccount: string): CallToolResult | null {
+  const accounts = client.smartAccounts;
+  if (!accounts || accounts.length === 0) {
+    return error('ACCOUNT_NOT_FOUND', 'No smart accounts found.', 'Use azeth_create_account to create one.');
+  }
+
+  const indexMatch = smartAccount.match(/^#(\d+)$/);
+  if (indexMatch) {
+    const idx = parseInt(indexMatch[1]!) - 1;
+    if (idx < 0 || idx >= accounts.length) {
+      return error('INVALID_INPUT',
+        `Account #${indexMatch[1]} not found. You have ${accounts.length} account(s).`,
+        'Use azeth_accounts to list your accounts.');
+    }
+    client.setActiveAccount(accounts[idx]!);
+    return null;
+  }
+
+  if (/^0x[0-9a-fA-F]{40}$/i.test(smartAccount)) {
+    try {
+      client.setActiveAccount(smartAccount as `0x${string}`);
+    } catch {
+      return error('INVALID_INPUT',
+        `Address ${smartAccount} is not one of your smart accounts.`,
+        'Use azeth_accounts to list your accounts.');
+    }
+    return null;
+  }
+
+  return error('INVALID_INPUT',
+    'Invalid smartAccount format.',
+    'Use "#N" (e.g., "#2") for account index, or a full Ethereum address. Run azeth_accounts to see your accounts.');
+}
+
 /** Register payment-related MCP tools: azeth_pay, azeth_smart_pay, azeth_create_payment_agreement */
 export function registerPaymentTools(server: McpServer): void {
   // ──────────────────────────────────────────────
@@ -203,6 +244,7 @@ export function registerPaymentTools(server: McpServer): void {
         method: z.enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']).optional().describe('HTTP method. Defaults to "GET".'),
         body: z.string().max(100_000).optional().describe('Request body for POST/PUT/PATCH requests (JSON string, max 100KB).'),
         maxAmount: z.string().max(32).optional().describe('Maximum USDC amount willing to pay (e.g., "5.00"). Rejects if service costs more.'),
+        smartAccount: z.string().optional().describe('Smart account to pay from. Use "#1", "#2", etc. (index from azeth_accounts) or a full address. Defaults to your first smart account.'),
       }),
     },
     async (args) => {
@@ -216,6 +258,12 @@ export function registerPaymentTools(server: McpServer): void {
       let client;
       try {
         client = await createClient(args.chain);
+
+        // Apply smart account selection if specified
+        if (args.smartAccount) {
+          const selectionErr = applySmartAccountSelection(client, args.smartAccount);
+          if (selectionErr) return selectionErr;
+        }
         let maxAmount: bigint | undefined;
         if (args.maxAmount) {
           try {
@@ -353,12 +401,20 @@ export function registerPaymentTools(server: McpServer): void {
         maxAmount: z.string().max(32).optional().describe('Maximum USDC amount willing to pay per service (e.g., "1.00"). Rejects if service costs more.'),
         minReputation: z.coerce.number().min(0).max(100).optional().describe('Minimum reputation score (0-100) to consider. Services below this are excluded.'),
         autoFeedback: z.boolean().optional().describe('Automatically submit a reputation opinion after payment based on service quality. Defaults to false.'),
+        smartAccount: z.string().optional().describe('Smart account to pay from. Use "#1", "#2", etc. (index from azeth_accounts) or a full address. Defaults to your first smart account.'),
       }),
     },
     async (args) => {
       let client;
       try {
         client = await createClient(args.chain);
+
+        // Apply smart account selection if specified
+        if (args.smartAccount) {
+          const selectionErr = applySmartAccountSelection(client, args.smartAccount);
+          if (selectionErr) return selectionErr;
+        }
+
         let maxAmount: bigint | undefined;
         if (args.maxAmount) {
           try {

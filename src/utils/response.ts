@@ -77,8 +77,8 @@ export function handleError(err: unknown): CallToolResult {
     if (decoded) {
       return error(
         err.code,
-        decoded,
-        getSuggestion(err.code, err.details),
+        decoded.message,
+        decoded.suggestion ?? getSuggestion(err.code, err.details),
       );
     }
     return error(
@@ -92,7 +92,7 @@ export function handleError(err: unknown): CallToolResult {
     // Attempt to decode contract revert selectors from the error message
     const decoded = decodeErrorSelector(err.message);
     if (decoded) {
-      return error('CONTRACT_ERROR', decoded, getSuggestion('CONTRACT_ERROR'));
+      return error('CONTRACT_ERROR', decoded.message, decoded.suggestion ?? getSuggestion('CONTRACT_ERROR'));
     }
     return error('UNKNOWN_ERROR', sanitizeErrorMessage(err.message));
   }
@@ -101,7 +101,7 @@ export function handleError(err: unknown): CallToolResult {
   const stringified = String(err);
   const decoded = decodeErrorSelector(stringified);
   if (decoded) {
-    return error('CONTRACT_ERROR', decoded, getSuggestion('CONTRACT_ERROR'));
+    return error('CONTRACT_ERROR', decoded.message, decoded.suggestion ?? getSuggestion('CONTRACT_ERROR'));
   }
   return error('UNKNOWN_ERROR', sanitizeErrorMessage(stringified));
 }
@@ -196,7 +196,7 @@ function getSuggestion(code: string, details?: Record<string, unknown>): string 
     case 'ACCOUNT_EXISTS':
       return 'An account already exists. Use azeth_accounts to list existing accounts.';
     case 'INSUFFICIENT_PAYMENT':
-      return 'You must pay the target agent at least $1 USD (via azeth_transfer) before rating them. Use azeth_get_net_paid to check your payment history.';
+      return 'You must pay the target at least $1 USD before rating. Payments via azeth_pay, azeth_smart_pay, azeth_transfer, and payment agreements all count. Use azeth_get_net_paid to check your payment history.';
     case 'RECIPIENT_UNREACHABLE':
       return 'The recipient is not reachable on the XMTP network. Use azeth_check_reachability to verify before sending.';
     case 'SERVER_UNAVAILABLE':
