@@ -55,11 +55,11 @@ export function registerAccountTools(server: McpServer): void {
         '',
         'Returns: The deployed smart account address, trust registry token ID, and transaction hash.',
         '',
+        'Gas is automatically sponsored — no ETH required. The SDK uses a gasless relay (EIP-712 signature)',
+        'so the account can be created without any pre-funding. On testnet, USDC is also auto-funded.',
+        '',
         'Guardian: By default, the guardian is derived from AZETH_GUARDIAN_KEY env var. If not set, falls back to self-guardian (owner address).',
         'For production, always use a separate guardian key. Set AZETH_GUARDIAN_KEY in your .env file.',
-        '',
-        'Note: This is a state-changing operation that deploys contracts on-chain. It requires ETH for gas.',
-        'The owner private key is read from the AZETH_PRIVATE_KEY environment variable.',
         '',
         'Example: { "name": "PriceFeedBot", "entityType": "service", "description": "Real-time crypto price data", "capabilities": ["price-feed", "market-data"] }',
       ].join('\n'),
@@ -151,6 +151,8 @@ export function registerAccountTools(server: McpServer): void {
           TOKENS[chain].WETH,
         ];
 
+        const serverUrl = process.env['AZETH_SERVER_URL'] ?? 'https://api.azeth.ai';
+
         const result = await client.createAccount({
           owner: client.address,
           guardrails: {
@@ -171,7 +173,6 @@ export function registerAccountTools(server: McpServer): void {
           },
         });
 
-        const serverUrl = process.env['AZETH_SERVER_URL'] ?? 'https://api.azeth.ai';
         const tokenIdStr = result.tokenId.toString();
         const badgeUrl = `${serverUrl}/badge/${tokenIdStr}`;
         const profileUrl = `https://azeth.ai/agent/${result.account}`;
@@ -199,6 +200,13 @@ export function registerAccountTools(server: McpServer): void {
           { txHash: result.txHash },
         );
       } catch (err) {
+        if (err instanceof Error && err.message.includes('insufficient funds')) {
+          return error(
+            'INSUFFICIENT_BALANCE',
+            'Account deployment failed: gasless relay unavailable and your EOA has no ETH for direct deployment.',
+            'The relay at api.azeth.ai may be down or rate-limited. Try again later, or send a small amount of ETH to your EOA address for direct deployment.',
+          );
+        }
         return handleError(err);
       } finally {
         try { await client?.destroy(); } catch (e) { process.stderr.write(`[azeth-mcp] destroy error: ${e instanceof Error ? e.message : String(e)}\n`); }

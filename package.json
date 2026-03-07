@@ -1,6 +1,6 @@
 {
   "name": "@azeth/mcp-server",
-  "version": "0.2.4",
+  "version": "0.2.5",
   "mcpName": "io.github.azeth-protocol/mcp-server",
   "type": "module",
   "description": "MCP server for the Azeth trust infrastructure — smart accounts, payments, reputation, and discovery tools for AI agents",
@@ -41,8 +41,8 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@azeth/common": "^0.2.4",
-    "@azeth/sdk": "^0.2.4",
+    "@azeth/common": "^0.2.5",
+    "@azeth/sdk": "^0.2.5",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "dotenv": "^16.4.0",
     "viem": "^2.21.0",

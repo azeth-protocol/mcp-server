@@ -9,7 +9,9 @@
 
 MCP (Model Context Protocol) server for Azeth -- the trust, discovery, and payment layer for the machine economy. Provides 32 tools for AI agents to create accounts, make payments, discover services, manage reputation, and communicate via XMTP.
 
-## Setup
+## Zero-Config Setup
+
+No API keys required. A private key is auto-generated and persisted at `~/.azeth/key`. Gas is sponsored automatically.
 
 ### Claude Desktop
 
@@ -20,11 +22,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
   "mcpServers": {
     "azeth": {
       "command": "npx",
-      "args": ["@azeth/mcp-server"],
-      "env": {
-        "AZETH_PRIVATE_KEY": "0x...",
-        "PIMLICO_API_KEY": "your-pimlico-api-key"
-      }
+      "args": ["@azeth/mcp-server"]
     }
   }
 }
@@ -39,27 +37,26 @@ Add to `.claude/settings.json` in your project:
   "mcpServers": {
     "azeth": {
       "command": "npx",
-      "args": ["@azeth/mcp-server"],
-      "env": {
-        "AZETH_PRIVATE_KEY": "0x...",
-        "PIMLICO_API_KEY": "your-pimlico-api-key"
-      }
+      "args": ["@azeth/mcp-server"]
     }
   }
 }
 ```
 
-### Local Development
+Then ask Claude: *"Create me a smart account called PriceFeedBot"* -- that's it.
+
+### With Your Own Key
+
+For production or to use an existing key, add environment variables:
 
 ```json
 {
   "mcpServers": {
     "azeth": {
-      "command": "node",
-      "args": ["path/to/Azeth/packages/mcp-server/dist/index.js"],
+      "command": "npx",
+      "args": ["@azeth/mcp-server"],
       "env": {
-        "AZETH_PRIVATE_KEY": "0x...",
-        "PIMLICO_API_KEY": "your-pimlico-api-key"
+        "AZETH_PRIVATE_KEY": "0x..."
       }
     }
   }
@@ -68,14 +65,17 @@ Add to `.claude/settings.json` in your project:
 
 ## Environment Variables
 
+All optional. The server works with zero configuration on testnet.
+
 | Variable | Required | Description |
 |---|---|---|
-| `AZETH_PRIVATE_KEY` | Yes | Account owner's private key (0x-prefixed hex) |
-| `PIMLICO_API_KEY` | Yes* | Pimlico bundler/paymaster API key (*required for state-changing operations) |
-| `AZETH_CHAIN` | No | `"baseSepolia"` or `"base"` (default: `baseSepolia`) |
-| `AZETH_RPC_URL` | No | Custom RPC endpoint |
+| `AZETH_PRIVATE_KEY` | No | Account owner's private key. Auto-generated and saved to `~/.azeth/key` if not set. |
+| `PIMLICO_API_KEY` | No | Pimlico bundler API key. Falls back to Azeth server bundler proxy if not set. |
+| `AZETH_CHAIN` | No | `"baseSepolia"`, `"ethereumSepolia"`, `"base"`, or `"ethereum"` (default: `baseSepolia`) |
+| `AZETH_RPC_URL_BASE_SEPOLIA` | No | Custom RPC endpoint (per-chain: `AZETH_RPC_URL_BASE`, `AZETH_RPC_URL_ETH_SEPOLIA`, `AZETH_RPC_URL_ETHEREUM`) |
 | `AZETH_SERVER_URL` | No | Azeth API server URL (default: `https://api.azeth.ai`) |
-| `XMTP_ENCRYPTION_KEY` | No | For XMTP messaging tools |
+| `AZETH_GUARDIAN_KEY` | No | Separate guardian key for co-signing high-value operations |
+| `XMTP_ENCRYPTION_KEY` | No | For persistent XMTP messaging across restarts |
 
 ## Tools (32)
 

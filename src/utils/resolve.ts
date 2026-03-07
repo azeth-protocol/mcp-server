@@ -1,5 +1,5 @@
 import type { AzethKit } from '@azeth/sdk';
-import { AzethError, AZETH_CONTRACTS, ERC8004_REGISTRY } from '@azeth/common';
+import { AzethError, AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS } from '@azeth/common';
 import { TrustRegistryModuleAbi, AzethOracleAbi } from '@azeth/common/abis';
 import { validateAddress, resolveChain, resolveViemChain } from './client.js';
 
@@ -128,7 +128,7 @@ export async function resolveAddress(
     try {
       const { createPublicClient, http } = await import('viem');
       const viemChain = resolveViemChain(chain);
-      const rpcUrl = process.env['AZETH_RPC_URL'];
+      const rpcUrl = process.env[RPC_ENV_KEYS[chain]] ?? SUPPORTED_CHAINS[chain].rpcDefault;
       const pubClient = createPublicClient({ chain: viemChain, transport: http(rpcUrl) });
 
       const tokenId = BigInt(tokenMatch[1]!);
@@ -275,7 +275,7 @@ async function resolveNameOnChain(
   const { createPublicClient, http } = await import('viem');
   const chain = resolveChain(process.env['AZETH_CHAIN']);
   const viemChain = resolveViemChain(chain);
-  const rpcUrl = process.env['AZETH_RPC_URL'];
+  const rpcUrl = process.env[RPC_ENV_KEYS[chain]] ?? SUPPORTED_CHAINS[chain].rpcDefault;
 
   const registryAddress = ERC8004_REGISTRY[chain];
   const oracleAddress = AZETH_CONTRACTS[chain]?.priceOracle;

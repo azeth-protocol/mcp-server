@@ -1,5 +1,5 @@
 import { AzethKit, type AzethKitConfig } from '@azeth/sdk';
-import { AzethError, resolveChainAlias, resolveViemChain, type XMTPConfig, type SupportedChainName } from '@azeth/common';
+import { AzethError, resolveChainAlias, resolveViemChain, RPC_ENV_KEYS, type XMTPConfig, type SupportedChainName } from '@azeth/common';
 
 /** Resolve a chain argument to a canonical SupportedChainName.
  *  Resolution order: explicit arg > AZETH_CHAIN env > 'baseSepolia' default.
@@ -73,7 +73,9 @@ export async function createClient(
     guardianAutoSign,
   };
 
-  const rpcUrl = process.env['AZETH_RPC_URL'];
+  // SDK resolves RPC from SUPPORTED_CHAINS[chain].rpcDefault when config.rpcUrl is not set.
+  // Per-chain env vars (AZETH_RPC_URL_BASE_SEPOLIA, etc.) override the default.
+  const rpcUrl = process.env[RPC_ENV_KEYS[resolvedChain]];
   if (rpcUrl) {
     config.rpcUrl = rpcUrl;
   }

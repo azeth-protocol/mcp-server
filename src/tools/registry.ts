@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { hexToString } from 'viem';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { discoverServicesWithFallback, getRegistryEntry } from '@azeth/sdk';
-import { AZETH_CONTRACTS, ERC8004_REGISTRY, formatTokenAmount, CATALOG_MAX_ENTRIES, CATALOG_MAX_PATH_LENGTH } from '@azeth/common';
+import { AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS, formatTokenAmount, CATALOG_MAX_ENTRIES, CATALOG_MAX_PATH_LENGTH } from '@azeth/common';
 import type { CatalogEntry, CatalogMethod } from '@azeth/common';
 import { TrustRegistryModuleAbi, ReputationModuleAbi } from '@azeth/common/abis';
 import { createClient, resolveChain, resolveViemChain, validateAddress } from '../utils/client.js';
@@ -287,7 +287,7 @@ export function registerRegistryTools(server: McpServer): void {
         // Create a public client for the on-chain fallback
         const { createPublicClient, http } = await import('viem');
         const chain = resolveViemChain(chainName);
-        const rpcUrl = process.env['AZETH_RPC_URL'];
+        const rpcUrl = process.env[RPC_ENV_KEYS[chainName]] ?? SUPPORTED_CHAINS[chainName].rpcDefault;
         const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
 
         const result = await discoverServicesWithFallback(
@@ -444,7 +444,7 @@ export function registerRegistryTools(server: McpServer): void {
         // Create a public client for on-chain reads
         const { createPublicClient, http } = await import('viem');
         const viemChain = resolveViemChain(chainName);
-        const rpcUrl = process.env['AZETH_RPC_URL'];
+        const rpcUrl = process.env[RPC_ENV_KEYS[chainName]] ?? SUPPORTED_CHAINS[chainName].rpcDefault;
         const publicClient = createPublicClient({ chain: viemChain, transport: http(rpcUrl) });
 
         // Resolve tokenId from address if needed

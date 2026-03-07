@@ -3,7 +3,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createClient, resolveChain, resolveViemChain, validateAddress } from '../utils/client.js';
 import { success, error, handleError, formatUSD } from '../utils/response.js';
 import { ReputationModuleAbi, TrustRegistryModuleAbi } from '@azeth/common/abis';
-import { AzethError, AZETH_CONTRACTS, formatTokenAmount } from '@azeth/common';
+import { AzethError, AZETH_CONTRACTS, RPC_ENV_KEYS, SUPPORTED_CHAINS, formatTokenAmount } from '@azeth/common';
 
 /** Maximum uint256 value for on-chain IDs */
 const MAX_UINT256 = (1n << 256n) - 1n;
@@ -151,7 +151,7 @@ export function registerReputationTools(server: McpServer): void {
 
         const resolved = resolveChain(args.chain);
         const chain = resolveViemChain(resolved);
-        const rpcUrl = process.env['AZETH_RPC_URL'];
+        const rpcUrl = process.env[RPC_ENV_KEYS[resolved]] ?? SUPPORTED_CHAINS[resolved].rpcDefault;
 
         const publicClient = createPublicClient({
           chain,
@@ -278,7 +278,7 @@ export function registerReputationTools(server: McpServer): void {
 
         const resolved = resolveChain(args.chain);
         const chain = resolveViemChain(resolved);
-        const rpcUrl = process.env['AZETH_RPC_URL'];
+        const rpcUrl = process.env[RPC_ENV_KEYS[resolved]] ?? SUPPORTED_CHAINS[resolved].rpcDefault;
 
         const publicClient = createPublicClient({
           chain,
