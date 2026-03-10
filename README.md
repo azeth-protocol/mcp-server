@@ -9,9 +9,21 @@
 
 MCP (Model Context Protocol) server for Azeth -- the trust, discovery, and payment layer for the machine economy. Provides 32 tools for AI agents to create accounts, make payments, discover services, manage reputation, and communicate via XMTP.
 
-## Zero-Config Setup
+## Setup
 
 No API keys required. A private key is auto-generated and persisted at `~/.azeth/key`. Gas is sponsored automatically.
+
+### Install
+
+```bash
+npm install -g @azeth/mcp-server
+```
+
+### Claude Code
+
+```bash
+claude mcp add azeth -- azeth-mcp
+```
 
 ### Claude Desktop
 
@@ -21,23 +33,7 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 {
   "mcpServers": {
     "azeth": {
-      "command": "npx",
-      "args": ["@azeth/mcp-server"]
-    }
-  }
-}
-```
-
-### Claude Code
-
-Add to `.claude/settings.json` in your project:
-
-```json
-{
-  "mcpServers": {
-    "azeth": {
-      "command": "npx",
-      "args": ["@azeth/mcp-server"]
+      "command": "azeth-mcp"
     }
   }
 }
@@ -53,8 +49,7 @@ For production or to use an existing key, add environment variables:
 {
   "mcpServers": {
     "azeth": {
-      "command": "npx",
-      "args": ["@azeth/mcp-server"],
+      "command": "azeth-mcp",
       "env": {
         "AZETH_PRIVATE_KEY": "0x..."
       }
@@ -155,6 +150,22 @@ Errors include machine-readable codes and recovery suggestions:
 ## Full Documentation
 
 See the [Azeth documentation](https://azeth.ai) for complete tool reference with parameter tables, return values, and example prompts for all 32 tools.
+
+## Troubleshooting
+
+### "Failed to connect to MCP server"
+
+If you used `npx` instead of a global install, `npx` has two problems as an MCP server launcher:
+
+1. **Installation prompt blocks stdin** — `npx` prompts "Ok to proceed? (y)" which reads from the same stdin the MCP protocol uses, deadlocking the connection.
+2. **Cold-start download timeout** — First run must download ~142 packages before the server can start. Claude's MCP client times out waiting.
+
+Fix by installing globally:
+
+```bash
+npm install -g @azeth/mcp-server
+claude mcp add azeth -- azeth-mcp
+```
 
 ## Development
 
