@@ -11,11 +11,14 @@ vi.mock('../../src/utils/client.js', async (importOriginal) => {
   };
 });
 
-// Mock DNS resolution to return a public IP so SSRF validation passes in tests
+// Mock DNS resolution to return a public IP so SSRF validation passes in tests.
+// The guard resolves via dns.lookup (getaddrinfo), so the mock returns LookupAddress[].
 vi.mock('node:dns/promises', () => ({
   default: {
-    resolve4: vi.fn().mockResolvedValue(['93.184.216.34']),
-    resolve6: vi.fn().mockResolvedValue(['2606:2800:220:1:248:1893:25c8:1946']),
+    lookup: vi.fn().mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+    ]),
   },
 }));
 

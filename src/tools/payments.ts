@@ -113,27 +113,22 @@ async function validateExternalUrl(urlStr: string): Promise<ValidatedUrl> {
     }
   }
 
-  // F-9: DNS resolution check to catch rebinding/alternative encoding bypasses
-  // HIGH-7 fix: Pin the resolved IPv4 addresses so they can be used for the actual
-  // fetch connection, preventing TOCTOU DNS rebinding attacks.
-  let pinnedIPv4: string[] = [];
+  // F-9 / C-1 / HIGH-7: Resolve the hostname and reject any private/reserved address
+  // (DNS-rebinding / alternative-encoding bypasses), checking BOTH A and AAAA records.
+  //
+  // Resolve via getaddrinfo (dns.lookup) — the SAME resolver fetch()/the actual
+  // connection uses — NOT dns.resolve4/6 (c-ares direct nameserver queries). c-ares
+  // spuriously fails in restricted-DNS / sandboxed environments where getaddrinfo (and
+  // therefore the request itself) succeeds, and it can resolve differently than the
+  // connection (a TOCTOU gap). `{ all: true }` returns every A and AAAA record at once.
+  let resolved: Array<{ address: string; family: number }>;
   try {
-    const addresses = await dns.resolve4(hostname);
-    for (const addr of addresses) {
-      if (isPrivateIPv4(addr)) {
-        throw new AzethError(
-          'URL resolves to a private or reserved IP address. Only public HTTPS URLs are allowed.',
-          'INVALID_INPUT',
-        );
-      }
-    }
-    pinnedIPv4 = addresses;
+    resolved = await dns.lookup(hostname, { all: true });
   } catch (err) {
-    if (err instanceof AzethError) throw err;
-    // C-3: DNS resolution failure must REJECT — cannot verify URL safety
-    // Differentiate "hostname doesn't exist" (input error) from "DNS unreachable" (network error)
+    // C-3: DNS resolution failure must REJECT — cannot verify URL safety (fail closed).
+    // Differentiate "hostname doesn't exist" (input error) from "DNS unreachable" (network).
     const dnsErr = err as NodeJS.ErrnoException;
-    if (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENOENT') {
+    if (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA' || dnsErr.code === 'ENOENT') {
       throw new AzethError(
         'Hostname not found — verify the URL is correct',
         'INVALID_INPUT',
@@ -147,30 +142,32 @@ async function validateExternalUrl(urlStr: string): Promise<ValidatedUrl> {
     );
   }
 
-  // C-1: Also check IPv6 (AAAA) records for IPv6-mapped private addresses.
-  // Unlike A records, AAAA failure is acceptable (host may be IPv4-only),
-  // but if AAAA records EXIST they must all be public.
-  try {
-    const ipv6Addresses = await dns.resolve6(hostname);
-    for (const addr of ipv6Addresses) {
-      if (isPrivateIPv6(addr)) {
+  if (resolved.length === 0) {
+    throw new AzethError(
+      'Hostname not found — verify the URL is correct',
+      'INVALID_INPUT',
+      { hostname: url.hostname },
+    );
+  }
+
+  // Reject if ANY resolved address is private/reserved; pin the public IPv4s.
+  const pinnedIPv4: string[] = [];
+  for (const { address, family } of resolved) {
+    if (family === 6) {
+      if (isPrivateIPv6(address)) {
         throw new AzethError(
           'URL resolves to a private or reserved IPv6 address. Only public HTTPS URLs are allowed.',
           'INVALID_INPUT',
         );
       }
-    }
-  } catch (err) {
-    if (err instanceof AzethError) throw err;
-    // AAAA resolution failure (ENODATA/ENOTFOUND) is acceptable — IPv4-only host.
-    // However, if resolution succeeded but returned an unexpected error, reject.
-    const dnsErr = err as NodeJS.ErrnoException;
-    if (dnsErr.code && !['ENODATA', 'ENOTFOUND', 'ENOENT'].includes(dnsErr.code)) {
-      throw new AzethError(
-        'IPv6 DNS resolution failed unexpectedly — cannot verify URL safety',
-        'INVALID_INPUT',
-        { hostname: url.hostname, dnsErrorCode: dnsErr.code },
-      );
+    } else {
+      if (isPrivateIPv4(address)) {
+        throw new AzethError(
+          'URL resolves to a private or reserved IP address. Only public HTTPS URLs are allowed.',
+          'INVALID_INPUT',
+        );
+      }
+      pinnedIPv4.push(address);
     }
   }
 

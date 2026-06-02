@@ -12,17 +12,22 @@ vi.mock('../../src/utils/client.js', async (importOriginal) => {
   };
 });
 
-// Mock DNS resolution to return a public IP so SSRF validation passes in tests
+// Mock DNS resolution to return a public IP so SSRF validation passes in tests.
+// The guard resolves via dns.lookup (getaddrinfo), so the mock returns LookupAddress[].
 vi.mock('node:dns/promises', () => ({
   default: {
-    resolve4: vi.fn().mockResolvedValue(['93.184.216.34']),
-    resolve6: vi.fn().mockResolvedValue(['2606:2800:220:1:248:1893:25c8:1946']),
+    lookup: vi.fn().mockResolvedValue([
+      { address: '93.184.216.34', family: 4 },
+      { address: '2606:2800:220:1:248:1893:25c8:1946', family: 6 },
+    ]),
   },
 }));
 
 import { createClient } from '../../src/utils/client.js';
+import dns from 'node:dns/promises';
 
 const mockedCreateClient = vi.mocked(createClient);
+const mockedLookup = vi.mocked(dns.lookup);
 
 /** Create a mock Response object with a ReadableStream body for the streaming reader */
 function mockResponseWithBody(body: string, status = 200) {
@@ -107,6 +112,57 @@ describe('payment tools', () => {
       expect(parsed.data.statusCode).toBe(200);
       expect(parsed.data.body).toBe('{"result": "data"}');
       expect(mockClient.destroy).toHaveBeenCalled();
+    });
+
+    it('rejects a URL whose host resolves to a private IP (SSRF, via getaddrinfo)', async () => {
+      // Guard resolves via dns.lookup; a private result must be rejected before any network call.
+      mockedLookup.mockResolvedValueOnce([{ address: '10.0.0.5', family: 4 }] as never);
+
+      const tool = server.tools.get('azeth_pay')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+        url: 'https://rebind.example.com/data',
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBe(true);
+      expect(parsed.error.code).toBe('INVALID_INPUT');
+      expect(parsed.error.message).toMatch(/private or reserved/i);
+      // createClient must never be reached when the SSRF guard rejects.
+      expect(mockedCreateClient).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the hostname does not resolve (ENOTFOUND → INVALID_INPUT)', async () => {
+      mockedLookup.mockRejectedValueOnce(Object.assign(new Error('not found'), { code: 'ENOTFOUND' }));
+
+      const tool = server.tools.get('azeth_pay')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+        url: 'https://nonexistent.example.com/data',
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBe(true);
+      expect(parsed.error.code).toBe('INVALID_INPUT');
+      expect(parsed.error.message).toMatch(/hostname not found/i);
+    });
+
+    it('fails closed when DNS resolution errors (EAI_AGAIN → NETWORK_ERROR)', async () => {
+      mockedLookup.mockRejectedValueOnce(Object.assign(new Error('temporary failure'), { code: 'EAI_AGAIN' }));
+
+      const tool = server.tools.get('azeth_pay')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+        url: 'https://flaky-dns.example.com/data',
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBe(true);
+      expect(parsed.error.code).toBe('NETWORK_ERROR');
+      expect(parsed.error.message).toMatch(/cannot verify URL safety/i);
     });
 
     it('passes method and body to fetch402', async () => {
