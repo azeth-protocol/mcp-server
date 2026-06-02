@@ -11,6 +11,9 @@ concurrency:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # OIDC trusted publishing — authenticates to npm without a long-lived token
     steps:
       - uses: actions/checkout@v4
 
@@ -22,6 +25,9 @@ jobs:
         with:
           node-version: 20
           registry-url: https://registry.npmjs.org
+
+      # Trusted publishing (OIDC) requires npm >= 11.5.1; Node 20 ships npm 10.
+      - run: npm install -g npm@latest
 
       - run: pnpm install --no-frozen-lockfile
       - run: pnpm build
@@ -38,5 +44,3 @@ jobs:
             npm publish --access public
             echo "Published $PACKAGE_NAME@$LOCAL_VER"
           fi
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
