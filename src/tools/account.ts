@@ -334,7 +334,7 @@ export function registerAccountTools(server: McpServer): void {
         '',
         'Returns: Array of transaction records with hash, from, to, value, block number, and timestamp.',
         '',
-        'Note: Full indexed history requires the Azeth server to be running. Returns empty results if the server is unavailable.',
+        'Note: Complete history requires the Azeth indexer. When it is unavailable, this returns a best-effort recent-only window the RPC can serve and sets indexedHistoryUnavailable=true (it never errors) — treat a flagged result as partial, not as "no activity".',
         'The account is determined by the AZETH_PRIVATE_KEY environment variable.',
         '',
         'Example: { "limit": 5 } or { "smartAccount": "#2", "limit": 20 }',
