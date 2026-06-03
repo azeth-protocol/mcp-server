@@ -390,6 +390,43 @@ describe('agreement tools', () => {
       expect(mockClient.destroy).toHaveBeenCalled();
     });
 
+    it('reports canExecute=false when structurally executable but not yet due (S-5)', async () => {
+      const agreement = mockAgreement();
+      const nextTime = BigInt(Math.floor(Date.now() / 1000) + 45); // future ⇒ not due
+
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(
+          mockAgreementData(agreement, {
+            executable: true, // structurally valid (requireElapsed=false)
+            reason: '',
+            isDue: false, // interval not elapsed yet
+            nextExecutionTime: nextTime,
+          }),
+        ),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_agreement')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        account: MOCK_SMART_ACCOUNT,
+        agreementId: 0,
+      });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.status).toBe('active');
+      expect(parsed.data.isDue).toBe(false);
+      // Previously canExecute leaked the contract's `executable` (true), so it
+      // claimed canExecute:true while execute() rejects the not-yet-due agreement.
+      expect(parsed.data.canExecute).toBe(false);
+    });
+
     it('returns error for non-existent agreement', async () => {
       const mockClient = {
         address: MOCK_SMART_ACCOUNT,
@@ -635,6 +672,90 @@ describe('agreement tools', () => {
       expect(parsed.data.dueAgreements[0].agreementId).toBe('0');
       expect(parsed.data.dueAgreements[0].tokenSymbol).toBe('ETH');
       expect(mockClient.destroy).toHaveBeenCalled();
+    });
+
+    it('clamps estimatedPayout to the remaining budget near the cap (F-3)', async () => {
+      // amount 0.00001 ETH, half an interval elapsed ⇒ pro-rata ≈ 0.000005 ETH,
+      // but only 0.000001777... ETH of budget remains (totalCap - totalPaid).
+      const nearCap = mockAgreement({
+        active: true,
+        amount: 10000000000000n, // 0.00001 ETH
+        interval: 60n,
+        lastExecuted: BigInt(Math.floor(Date.now() / 1000) - 30), // half interval elapsed
+        totalCap: 50000000000000n, // 0.00005 ETH
+        totalPaid: 48222222222222n, // remaining = 1777777777778n
+      });
+
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(
+          mockAgreementData(nearCap, {
+            executable: true,
+            reason: '',
+            isDue: true,
+            nextExecutionTime: BigInt(Math.floor(Date.now() / 1000) - 30),
+            count: 1n,
+          }),
+        ),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_due_agreements')!;
+      const result = await tool.handler({ chain: 'baseSepolia' });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.dueAgreements).toHaveLength(1);
+      // Clamped to remaining budget (1777777777778 wei), NOT the un-clamped
+      // pro-rata estimate of 0.000005 ETH (= formatUnits(5000000000000n, 18)).
+      expect(parsed.data.dueAgreements[0].estimatedPayout).toBe('0.000001777777777778');
+      expect(parseFloat(parsed.data.dueAgreements[0].estimatedPayout)).toBeLessThan(0.000005);
+    });
+
+    it('computes overdueBy from the scheduled time, always present (F-4)', async () => {
+      // Scheduled 290s ago (lastExecuted now-350, interval 60). The contract clamps
+      // getNextExecutionTime to ~now, so the old code reported overdueBy ~"1 seconds"
+      // or omitted it entirely.
+      const overdue = mockAgreement({
+        active: true,
+        interval: 60n,
+        lastExecuted: BigInt(Math.floor(Date.now() / 1000) - 350),
+      });
+      const clampedNextExec = BigInt(Math.floor(Date.now() / 1000) + 5); // clamp ⇒ ~now
+
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(
+          mockAgreementData(overdue, {
+            executable: true,
+            reason: '',
+            isDue: true,
+            nextExecutionTime: clampedNextExec,
+            count: 1n,
+          }),
+        ),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_due_agreements')!;
+      const result = await tool.handler({ chain: 'baseSepolia' });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.dueAgreements).toHaveLength(1);
+      // Field is always present and reflects the true ~290s overdue (≈ "4 minutes 50
+      // seconds"), not the clamped ~1s.
+      expect(parsed.data.dueAgreements[0]).toHaveProperty('overdueBy');
+      expect(parsed.data.dueAgreements[0].overdueBy).toMatch(/minute/);
+      expect(parsed.data.dueAgreements[0].overdueBy).not.toMatch(/^[01] seconds?$/);
     });
 
     it('scans multiple accounts', async () => {

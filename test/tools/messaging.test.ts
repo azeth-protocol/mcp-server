@@ -273,6 +273,31 @@ describe('messaging tools', () => {
       expect(mockClient.canReach).toHaveBeenCalledWith(TEST_ADDRESS);
     });
 
+    it('resolves a registry smart account to its owner EOA for XMTP (F-9)', async () => {
+      const OWNER_EOA = '0x87e30859Cb1f446233F63da0c2DC1F3d236734D1' as `0x${string}`;
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        // AzethFactory.getOwnerOf(smartAccount) → owner EOA (the XMTP identity)
+        publicClient: { readContract: vi.fn().mockResolvedValue(OWNER_EOA) },
+        canReach: vi.fn().mockResolvedValue(true),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_check_reachability')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        address: MOCK_SMART_ACCOUNT, // a registry smart account address
+      });
+
+      const { parsed } = parseResult(result);
+      // Reachability is checked against the owner EOA, not the (unreachable) account.
+      expect(mockClient.canReach).toHaveBeenCalledWith(OWNER_EOA);
+      expect(parsed.data.address).toBe(OWNER_EOA);
+      expect(parsed.data.smartAccount).toBe(MOCK_SMART_ACCOUNT);
+      expect(parsed.data.reachable).toBe(true);
+    });
+
     it('returns reachable=false when address is not on XMTP', async () => {
       const mockClient = {
         address: MOCK_SMART_ACCOUNT,

@@ -579,20 +579,23 @@ export function registerAgreementTools(server: McpServer): void {
         let nextExecutionTime: string;
         let nextExecutionIn: string;
         let isDue = contractIsDue;
-        let canExecute = executable;
         let canExecuteReason: string | undefined;
 
         if (status !== 'active') {
           nextExecutionTime = 'N/A';
           nextExecutionIn = `N/A (${status})`;
-          canExecute = false;
           isDue = false;
         } else {
           nextExecutionTime = new Date(Number(nextExecTime) * 1000).toISOString();
           const nowSecs = Math.floor(Date.now() / 1000);
           const diff = Number(nextExecTime) - nowSecs;
           if (diff <= 0) {
-            nextExecutionIn = `now (overdue by ${formatOverdue(-diff)})`;
+            // getNextExecutionTime clamps overdue times to block.timestamp, so `diff`
+            // understates how overdue we are (always ~0-1s). Compute the real overdue
+            // span from the scheduled time (lastExecuted + interval) — F-4.
+            const scheduledSecs = Number(agreement.lastExecuted) + Number(agreement.interval);
+            const overdueSecs = Math.max(0, nowSecs - scheduledSecs);
+            nextExecutionIn = `now (overdue by ${formatOverdue(overdueSecs)})`;
             isDue = true;
           } else {
             nextExecutionIn = formatCountdown(diff);
@@ -602,6 +605,13 @@ export function registerAgreementTools(server: McpServer): void {
             canExecuteReason = reason;
           }
         }
+
+        // canExecute must reflect whether `execute` would succeed RIGHT NOW: the
+        // agreement has to be both structurally valid (contract `executable`,
+        // requireElapsed=false) AND have its interval elapsed (`isDue`). Reporting
+        // `executable` alone misled consumers — a not-yet-due agreement showed
+        // canExecute:true while execute() rejects it with "not due yet" (S-5).
+        const canExecute = executable && isDue;
 
         // Payee name resolution
         const payeeName = await lookupPayeeName(client, agreement.payee);
@@ -868,16 +878,24 @@ export function registerAgreementTools(server: McpServer): void {
               ? (agreement.amount * elapsed) / agreement.interval
               : agreement.amount;
             // Cap at 3x interval (max accrual multiplier)
-            const cappedPayout = estimatedPayout > agreement.amount * 3n
+            let cappedPayout = estimatedPayout > agreement.amount * 3n
               ? agreement.amount * 3n
               : estimatedPayout;
-
-            // Calculate overdue from nextExecutionTime (already available, no extra RPC)
-            let overdueBy: string | undefined;
-            const diff = Math.floor(Date.now() / 1000) - Number(nextExecTime);
-            if (diff > 0) {
-              overdueBy = formatOverdue(diff);
+            // Clamp to the remaining budget (totalCap - totalPaid), mirroring
+            // PaymentAgreementModule's on-chain clamp, so the advertised estimate
+            // matches what execute() actually pays near the cap — and so payout-based
+            // sort ordering is correct (F-3).
+            if (agreement.totalCap > 0n) {
+              const remainingBudget = agreement.totalCap - agreement.totalPaid;
+              if (cappedPayout > remainingBudget) cappedPayout = remainingBudget;
             }
+
+            // Overdue span from the scheduled time (lastExecuted + interval), not the
+            // contract's getNextExecutionTime which clamps overdue values to
+            // block.timestamp (so they always read ~1s). Always present for a
+            // consistent shape — this list contains only due agreements (F-4).
+            const scheduledSecs = Number(agreement.lastExecuted) + Number(agreement.interval);
+            const overdueBy = formatOverdue(Math.max(0, Math.floor(Date.now() / 1000) - scheduledSecs));
 
             // Payee name
             const payeeName = await lookupPayeeName(client, agreement.payee);
@@ -890,7 +908,7 @@ export function registerAgreementTools(server: McpServer): void {
               ...(payeeName ? { payeeName } : {}),
               tokenSymbol,
               estimatedPayout: formatUnits(cappedPayout, decimals),
-              ...(overdueBy ? { overdueBy } : {}),
+              overdueBy,
             });
           }
         }

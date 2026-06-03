@@ -341,11 +341,11 @@ export function registerPaymentTools(server: McpServer): void {
           let changed = false;
           for (const [key, val] of Object.entries(formatted)) {
             if (/amount/i.test(key) && typeof val === 'bigint') {
-              formatted[key] = formatTokenAmount(val, 6, 2) + ' USDC';
+              formatted[key] = formatTokenAmount(val, 6) + ' USDC';
               changed = true;
             } else if (/amount/i.test(key) && typeof val === 'string' && /^\d{7,}$/.test(val)) {
               try {
-                formatted[key] = formatTokenAmount(BigInt(val), 6, 2) + ' USDC';
+                formatted[key] = formatTokenAmount(BigInt(val), 6) + ' USDC';
                 changed = true;
               } catch { /* keep original */ }
             }
@@ -496,11 +496,11 @@ export function registerPaymentTools(server: McpServer): void {
           let changed = false;
           for (const [key, val] of Object.entries(formatted)) {
             if (/amount/i.test(key) && typeof val === 'bigint') {
-              formatted[key] = formatTokenAmount(val, 6, 2) + ' USDC';
+              formatted[key] = formatTokenAmount(val, 6) + ' USDC';
               changed = true;
             } else if (/amount/i.test(key) && typeof val === 'string' && /^\d{7,}$/.test(val)) {
               try {
-                formatted[key] = formatTokenAmount(BigInt(val), 6, 2) + ' USDC';
+                formatted[key] = formatTokenAmount(BigInt(val), 6) + ' USDC';
                 changed = true;
               } catch { /* keep original */ }
             }

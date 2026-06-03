@@ -224,6 +224,21 @@ describe('reputation tools', () => {
       expect(parsed.data.opinionCount).toBe('5');
     });
 
+    it('labels totalWeight as a dampened weight, not dollars (F-6)', async () => {
+      mockPublicClient.readContract.mockResolvedValue([85n, 1000000n, 5n]);
+
+      const tool = server.tools.get('azeth_get_weighted_reputation')!;
+      const result = await tool.handler({ chain: 'baseSepolia', agentId: '42', raters: [] });
+
+      const { parsed } = parseResult(result);
+      const desc: string = parsed.data.totalWeightDescription;
+      // Must clarify the value is a dampened USD^(2/3) weight, NOT a dollar amount,
+      // instead of the prior misleading "economic skin-in-the-game" framing.
+      expect(desc).toContain('NOT a dollar amount');
+      expect(desc).toMatch(/pow2over3|USD\^\(2\/3\)/);
+      expect(desc).not.toContain('skin-in-the-game');
+    });
+
     it('uses getWeightedReputation when raters are provided', async () => {
       mockPublicClient.readContract.mockResolvedValue([90n, 500000n, 2n]);
 

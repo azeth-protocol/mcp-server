@@ -230,7 +230,7 @@ export function registerReputationTools(server: McpServer): void {
           weightedValueFormatted,
           totalWeight: totalWeight.toString(),
           totalWeightFormatted,
-          totalWeightDescription: 'Aggregate economic skin-in-the-game (higher = more payments behind opinions)',
+          totalWeightDescription: 'Aggregate opinion weight: sum of pow2over3(netPaidUSD) per rater — a USD^(2/3) anti-whale dampened value, NOT a dollar amount.',
           opinionCount: opinionCount.toString(),
           ratersFilter: raterAddrs.length > 0 ? raterAddrs : '(all raters)',
         });

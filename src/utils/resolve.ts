@@ -1,7 +1,9 @@
 import type { AzethKit } from '@azeth/sdk';
-import { AzethError, AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS } from '@azeth/common';
-import { TrustRegistryModuleAbi, AzethOracleAbi } from '@azeth/common/abis';
+import { AzethError, AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS, type SupportedChainName } from '@azeth/common';
+import { TrustRegistryModuleAbi, AzethOracleAbi, AzethFactoryAbi } from '@azeth/common/abis';
 import { validateAddress, resolveChain, resolveViemChain } from './client.js';
+
+const ZERO_ADDRESS = '0x0000000000000000000000000000000000000000' as const;
 
 /** Minimal ABI for ERC-8004 Identity Registry tokenURI (external contract) */
 const ERC8004_TOKEN_URI_ABI = [
@@ -59,6 +61,38 @@ async function lookupAccountName(
   } catch {
     return null;
   }
+}
+
+/**
+ * Map a resolved address to the identity that XMTP messaging is keyed by.
+ *
+ * Trust-registry identities are smart accounts, but XMTP identities are keyed by
+ * the owner EOA. So discovering a peer via the registry yields its smart account
+ * address, which XMTP reports as unreachable — messaging only works against the
+ * owner EOA (F-9). This maps a smart account to its owner via
+ * AzethFactory.getOwnerOf. Returns the input unchanged when it is not a registered
+ * smart account (getOwnerOf == 0) or the lookup is unavailable, so a plain EOA
+ * passes through untouched.
+ */
+export async function resolveMessagingAddress(
+  address: `0x${string}`,
+  client: AzethKit,
+  chain: SupportedChainName,
+): Promise<`0x${string}`> {
+  const factory = AZETH_CONTRACTS[chain]?.factory;
+  if (!factory || factory === ('' as `0x${string}`)) return address;
+  try {
+    const ownerEoa = await client.publicClient.readContract({
+      address: factory,
+      abi: AzethFactoryAbi,
+      functionName: 'getOwnerOf',
+      args: [address],
+    }) as `0x${string}`;
+    if (ownerEoa && ownerEoa !== ZERO_ADDRESS) return ownerEoa;
+  } catch {
+    // Not a registered smart account (or factory unavailable) — use the address as-is.
+  }
+  return address;
 }
 
 /** Result of resolving a human-friendly identifier to an on-chain address */

@@ -238,6 +238,36 @@ describe('registry tools', () => {
       expect(parsed.data.services[1].name).toBe('SwapBot');
     });
 
+    it('always returns reputation as an object, never a bare number (F-1)', async () => {
+      // tokenId 3 carries a numeric server score (0-100). On-chain enrichment is
+      // unavailable in this harness (mocked publicClient has no readContract), so
+      // before normalization the bare number leaked alongside object-shaped
+      // entries, making the array polymorphic.
+      const entriesWithScore: RegistryEntry[] = [
+        { ...mockEntries[0]!, tokenId: 3n, reputation: 100 },
+        { ...mockEntries[1]!, tokenId: 4n }, // no reputation field
+      ];
+      mockedDiscoverWithFallback.mockResolvedValue({
+        entries: entriesWithScore,
+        source: 'server',
+      });
+
+      const tool = server.tools.get('azeth_discover_services')!;
+      const result = await tool.handler({ chain: 'baseSepolia' });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.services).toHaveLength(2);
+      for (const svc of parsed.data.services) {
+        expect(typeof svc.reputation).toBe('object');
+        expect(svc.reputation).not.toBeNull();
+        expect(typeof svc.reputation.weightedValue).toBe('string');
+        expect(svc.reputation).toHaveProperty('opinionCount');
+      }
+      // the numeric server score is preserved (as a string) in the object shape
+      const scored = parsed.data.services.find((s: { tokenId: string }) => s.tokenId === '3');
+      expect(scored.reputation.weightedValueFormatted).toBe('100');
+    });
+
     it('passes correct params to discoverServicesWithFallback', async () => {
       mockedDiscoverWithFallback.mockResolvedValue({
         entries: [],

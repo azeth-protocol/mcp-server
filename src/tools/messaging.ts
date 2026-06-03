@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { createClient } from '../utils/client.js';
-import { resolveAddress } from '../utils/resolve.js';
+import { createClient, resolveChain } from '../utils/client.js';
+import { resolveAddress, resolveMessagingAddress } from '../utils/resolve.js';
 import { success, error, handleError } from '../utils/response.js';
 
 /** Register XMTP messaging MCP tools: azeth_send_message, azeth_check_reachability, azeth_receive_messages, azeth_list_conversations, azeth_discover_agent_capabilities */
@@ -47,16 +47,21 @@ export function registerMessagingTools(server: McpServer): void {
           return handleError(resolveErr);
         }
 
+        // Map a registry smart account to its owner EOA (the XMTP identity) so a
+        // peer discovered via the registry is actually reachable (F-9).
+        const recipient = await resolveMessagingAddress(toResolved.address, client, resolveChain(args.chain));
+
         const conversationId = await client.sendMessage({
-          to: toResolved.address,
+          to: recipient,
           content: args.content,
           contentType: args.contentType,
         });
 
         return success({
           conversationId,
-          to: toResolved.address,
-          ...(toResolved.resolvedFrom ? { resolvedTo: `"${toResolved.resolvedFrom}" → ${toResolved.address}` } : {}),
+          to: recipient,
+          ...(toResolved.resolvedFrom ? { resolvedTo: `"${toResolved.resolvedFrom}" → ${recipient}` } : {}),
+          ...(recipient !== toResolved.address ? { smartAccount: toResolved.address } : {}),
           sent: true,
         });
       } catch (err) {
@@ -106,11 +111,15 @@ export function registerMessagingTools(server: McpServer): void {
           return handleError(resolveErr);
         }
 
-        const reachable = await client.canReach(resolved.address);
+        // XMTP is keyed by the owner EOA, so check reachability of the EOA behind a
+        // registry smart account rather than the (unreachable) account itself (F-9).
+        const peer = await resolveMessagingAddress(resolved.address, client, resolveChain(args.chain));
+        const reachable = await client.canReach(peer);
 
         return success({
-          address: resolved.address,
-          ...(resolved.resolvedFrom ? { resolvedFrom: `"${resolved.resolvedFrom}" → ${resolved.address}` } : {}),
+          address: peer,
+          ...(resolved.resolvedFrom ? { resolvedFrom: `"${resolved.resolvedFrom}" → ${peer}` } : {}),
+          ...(peer !== resolved.address ? { smartAccount: resolved.address } : {}),
           reachable,
         });
       } catch (err) {
@@ -167,11 +176,15 @@ export function registerMessagingTools(server: McpServer): void {
             return handleError(resolveErr);
           }
 
-          const messages = await client.getMessages(fromResolved.address, limit);
+          // Messages arrive from the peer's owner EOA (its XMTP identity), so map a
+          // registry smart account to that EOA before filtering by sender (F-9).
+          const sender = await resolveMessagingAddress(fromResolved.address, client, resolveChain(args.chain));
+          const messages = await client.getMessages(sender, limit);
 
           return success({
-            from: fromResolved.address,
-            ...(fromResolved.resolvedFrom ? { resolvedFrom: `"${fromResolved.resolvedFrom}" → ${fromResolved.address}` } : {}),
+            from: sender,
+            ...(fromResolved.resolvedFrom ? { resolvedFrom: `"${fromResolved.resolvedFrom}" → ${sender}` } : {}),
+            ...(sender !== fromResolved.address ? { smartAccount: fromResolved.address } : {}),
             messageCount: messages.length,
             messages: messages.map(msg => ({
               sender: msg.sender,
@@ -311,10 +324,14 @@ export function registerMessagingTools(server: McpServer): void {
           return handleError(resolveErr);
         }
 
+        // Talk to the owner EOA (the XMTP identity) behind a registry smart
+        // account, otherwise the capabilities request never reaches the peer (F-9).
+        const peer = await resolveMessagingAddress(resolved.address, client, resolveChain(args.chain));
+
         // Send capabilities request
         const capabilitiesRequest = JSON.stringify({ type: 'capabilities' });
         await client.sendMessage({
-          to: resolved.address,
+          to: peer,
           content: capabilitiesRequest,
         });
 
@@ -326,7 +343,7 @@ export function registerMessagingTools(server: McpServer): void {
           // Wait before polling
           await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
 
-          const messages = await client.getMessages(resolved.address, 5);
+          const messages = await client.getMessages(peer, 5);
           if (messages.length > 0) {
             // Look for a capabilities response among recent messages
             for (const msg of messages) {
@@ -342,8 +359,9 @@ export function registerMessagingTools(server: McpServer): void {
                   (parsed as { type: string }).type === 'capabilities'
                 ) {
                   return success({
-                    agentAddress: resolved.address,
-                    ...(resolved.resolvedFrom ? { resolvedFrom: `"${resolved.resolvedFrom}" → ${resolved.address}` } : {}),
+                    agentAddress: peer,
+                    ...(resolved.resolvedFrom ? { resolvedFrom: `"${resolved.resolvedFrom}" → ${peer}` } : {}),
+                    ...(peer !== resolved.address ? { smartAccount: resolved.address } : {}),
                     capabilities: parsed,
                   });
                 }
@@ -357,7 +375,7 @@ export function registerMessagingTools(server: McpServer): void {
         // Timeout — no response received
         return error(
           'NETWORK_ERROR',
-          `No capabilities response received from ${resolved.address} within ${timeoutMs}ms. ` +
+          `No capabilities response received from ${peer} within ${timeoutMs}ms. ` +
           'The agent may be offline or does not have a MessageRouter configured.',
         );
       } catch (err) {
