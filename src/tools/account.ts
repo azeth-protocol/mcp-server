@@ -360,7 +360,7 @@ export function registerAccountTools(server: McpServer): void {
           }
         }
 
-        const history = await client.getHistory({ limit: args.limit ?? 10 }, forAccount);
+        const { transactions, indexedHistoryUnavailable } = await client.getHistory({ limit: args.limit ?? 10 }, forAccount);
 
         // Resolve token symbols and decimals for formatting
         const chain = resolveChain(args.chain);
@@ -369,7 +369,11 @@ export function registerAccountTools(server: McpServer): void {
 
         return success({
           smartAccount: client.smartAccount ?? 'not-deployed',
-          transactions: history.map((tx) => {
+          indexedHistoryUnavailable,
+          ...(indexedHistoryUnavailable
+            ? { note: 'Indexed history is unavailable — showing a best-effort recent-only window the RPC can serve. Full history requires the Azeth indexer.' }
+            : {}),
+          transactions: transactions.map((tx) => {
             // Determine token symbol and decimals for formatting
             const tokenAddr = tx.token?.toLowerCase() ?? null;
             let symbol = 'ETH';

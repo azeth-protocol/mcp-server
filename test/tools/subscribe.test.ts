@@ -191,33 +191,75 @@ describe('azeth_subscribe_service', () => {
     }
   });
 
-  it('validates cap requirement — rejects when neither maxExecutions nor totalCap provided', async () => {
-    const tool = server.tools.get('azeth_subscribe_service')!;
-    const result = await tool.handler({
-      chain: 'baseSepolia',
-      url: 'https://api.example.com/data',
-      // No maxExecutions, no totalCap
-    });
+  it('defaults totalCap to ~1 year when neither cap is provided (url-only) (OBS-4)', async () => {
+    const mockClient = {
+      createPaymentAgreement: vi.fn().mockResolvedValue({
+        agreementId: 7n,
+        txHash: '0xfeed' + '0'.repeat(60),
+      }),
+      destroy: vi.fn(),
+    };
+    mockedCreateClient.mockResolvedValueOnce(mockClient as any);
 
-    const { parsed, isError } = parseResult(result);
-    expect(isError).toBe(true);
-    expect(parsed.error.code).toBe('INVALID_INPUT');
-    expect(parsed.error.message).toContain('At least one limit is required');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 402,
+      headers: new Headers(make402ResponseHeaders()), // minAmountPerInterval '5000'
+    } as any);
+
+    try {
+      const tool = server.tools.get('azeth_subscribe_service')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        url: 'https://api.example.com/data',
+        // No maxExecutions, no totalCap — must succeed with a default cap, not reject.
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBeUndefined();
+      expect(parsed.success).toBe(true);
+      // amountPerInterval (5000) × 365 = 1,825,000 default totalCap.
+      expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith(
+        expect.objectContaining({ totalCap: 1825000n }),
+      );
+      expect(parsed.data.subscription.totalCap).toBe('1825000');
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
-  it('accepts maxExecutions=0 as "no cap" — still triggers cap validation', async () => {
-    const tool = server.tools.get('azeth_subscribe_service')!;
-    const result = await tool.handler({
-      chain: 'baseSepolia',
-      url: 'https://api.example.com/data',
-      maxExecutions: 0,
-      // No totalCap either — both are falsy
-    });
+  it('defaults the cap when maxExecutions=0 (no count limit) and no totalCap (OBS-4)', async () => {
+    const mockClient = {
+      createPaymentAgreement: vi.fn().mockResolvedValue({
+        agreementId: 8n,
+        txHash: '0xab' + '0'.repeat(62),
+      }),
+      destroy: vi.fn(),
+    };
+    mockedCreateClient.mockResolvedValueOnce(mockClient as any);
 
-    const { parsed, isError } = parseResult(result);
-    expect(isError).toBe(true);
-    expect(parsed.error.code).toBe('INVALID_INPUT');
-    expect(parsed.error.message).toContain('At least one limit is required');
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({
+      status: 402,
+      headers: new Headers(make402ResponseHeaders()),
+    } as any);
+
+    try {
+      const tool = server.tools.get('azeth_subscribe_service')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        url: 'https://api.example.com/data',
+        maxExecutions: 0, // no count cap — the amount cap must still be defaulted
+      });
+
+      const { isError } = parseResult(result);
+      expect(isError).toBeUndefined();
+      expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith(
+        expect.objectContaining({ totalCap: 1825000n }),
+      );
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('respects user interval override', async () => {

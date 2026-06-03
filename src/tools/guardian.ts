@@ -86,7 +86,11 @@ export function registerGuardianTools(server: McpServer): void {
         const usdc = TOKENS[chain].USDC;
         const weth = TOKENS[chain].WETH;
 
-        // Check common protocol whitelists (Azeth modules)
+        // Azeth core executor modules — installed on every Azeth account by the
+        // factory. These are NOT external protocols subject to the protocol
+        // whitelist (isProtocolWhitelisted always returns false for them), so they
+        // are reported separately as installedModules rather than as a misleading
+        // protocolWhitelist:false (OBS-3).
         const paymentAgreementModule = AZETH_CONTRACTS[chain].paymentAgreementModule;
         const reputationModule = AZETH_CONTRACTS[chain].reputationModule;
 
@@ -94,8 +98,6 @@ export function registerGuardianTools(server: McpServer): void {
           ethWhitelisted,
           usdcWhitelisted,
           wethWhitelisted,
-          paymentAgreementWhitelisted,
-          reputationWhitelisted,
         ] = await Promise.all([
           client.publicClient.readContract({
             address: guardianAddr,
@@ -114,18 +116,6 @@ export function registerGuardianTools(server: McpServer): void {
             abi: GuardianModuleAbi,
             functionName: 'isTokenWhitelisted',
             args: [account, weth],
-          }),
-          client.publicClient.readContract({
-            address: guardianAddr,
-            abi: GuardianModuleAbi,
-            functionName: 'isProtocolWhitelisted',
-            args: [account, paymentAgreementModule],
-          }),
-          client.publicClient.readContract({
-            address: guardianAddr,
-            abi: GuardianModuleAbi,
-            functionName: 'isProtocolWhitelisted',
-            args: [account, reputationModule],
           }),
         ]);
 
@@ -172,9 +162,11 @@ export function registerGuardianTools(server: McpServer): void {
             USDC: usdcWhitelisted as boolean,
             WETH: wethWhitelisted as boolean,
           },
-          protocolWhitelist: {
-            PaymentAgreementModule: paymentAgreementWhitelisted as boolean,
-            ReputationModule: reputationWhitelisted as boolean,
+          // Core executor modules installed on the account (not external protocols).
+          // These operate without being in the protocol whitelist.
+          installedModules: {
+            PaymentAgreementModule: paymentAgreementModule,
+            ReputationModule: reputationModule,
           },
           pendingGuardrailChange: pc.exists ? {
             changeHash: pc.changeHash,

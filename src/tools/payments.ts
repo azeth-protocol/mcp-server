@@ -697,8 +697,8 @@ export function registerPaymentTools(server: McpServer): void {
         chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
         url: z.string().url().max(2048).describe('The HTTPS URL of the x402-gated service to subscribe to.'),
         intervalSeconds: z.coerce.number().int().optional().describe('Override the suggested interval (seconds, minimum 60). Defaults to the service suggestion.'),
-        maxExecutions: z.coerce.number().int().optional().describe('Maximum number of payments. 0 or omit for unlimited.'),
-        totalCap: z.string().max(32).optional().describe('Maximum total payout in human-readable token units (e.g., "100.00").'),
+        maxExecutions: z.coerce.number().int().optional().describe('Maximum number of payments (count cap). 0 or omit for no count limit — an amount cap (totalCap) applies instead.'),
+        totalCap: z.string().max(32).optional().describe('Maximum total payout in human-readable token units (e.g., "100.00"). Omit BOTH this and maxExecutions to default to ~1 year of payments (amountPerInterval × 365).'),
       }),
     },
     async (args) => {
@@ -715,14 +715,6 @@ export function registerPaymentTools(server: McpServer): void {
       }
       if (args.maxExecutions !== undefined && args.maxExecutions < 0) {
         return error('INVALID_INPUT', 'maxExecutions must be 0 or greater.', '0 means unlimited. Omit for unlimited.');
-      }
-
-      // Contract requires at least one cap condition to prevent unlimited payments.
-      // endTime is set automatically (30 days from now) so we only check user-provided caps.
-      if (!args.maxExecutions && !args.totalCap) {
-        return error('INVALID_INPUT',
-          'At least one limit is required: maxExecutions or totalCap.',
-          'The contract requires a cap condition to prevent unlimited payments. E.g., maxExecutions: 30 for monthly billing.');
       }
 
       let client;
@@ -801,6 +793,15 @@ export function registerPaymentTools(server: McpServer): void {
           }
         }
 
+        // The contract requires a cap condition. When the caller supplies neither a
+        // count cap (maxExecutions) nor an amount cap (totalCap), default totalCap to
+        // ~1 year of payments by amount so a url-only subscribe succeeds with a
+        // bounded, predictable ceiling instead of being rejected (OBS-4). A provided
+        // maxExecutions is left to the SDK's amount * maxExecutions default.
+        if (!args.maxExecutions && totalCap === undefined) {
+          totalCap = amount * 365n;
+        }
+
         const result = await client.createPaymentAgreement({
           payee: terms.payee as `0x${string}`,
           token: terms.token as `0x${string}`,
@@ -820,6 +821,7 @@ export function registerPaymentTools(server: McpServer): void {
               amountPerInterval: terms.minAmountPerInterval,
               intervalSeconds: interval,
               maxExecutions: args.maxExecutions ?? 0,
+              ...(totalCap !== undefined ? { totalCap: totalCap.toString() } : {}),
               serviceUrl: args.url,
             },
           },

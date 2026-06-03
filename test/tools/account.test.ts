@@ -314,7 +314,7 @@ describe('account tools', () => {
       const mockClient = {
         address: MOCK_SMART_ACCOUNT,
         smartAccount: MOCK_SMART_ACCOUNT,
-        getHistory: vi.fn().mockResolvedValue([mockTx]),
+        getHistory: vi.fn().mockResolvedValue({ transactions: [mockTx], indexedHistoryUnavailable: false }),
         destroy: vi.fn(),
       };
       mockedCreateClient.mockResolvedValue(mockClient as never);
@@ -332,6 +332,7 @@ describe('account tools', () => {
       expect(parsed.data.transactions[0].hash).toBe('0xtx1');
       expect(parsed.data.transactions[0].value).toBe('1000000');
       expect(parsed.data.transactions[0].blockNumber).toBe('12345');
+      expect(parsed.data.indexedHistoryUnavailable).toBe(false);
       // Default limit = 10
       expect(mockClient.getHistory).toHaveBeenCalledWith({ limit: 10 }, undefined);
     });
@@ -340,7 +341,7 @@ describe('account tools', () => {
       const mockClient = {
         address: MOCK_SMART_ACCOUNT,
         smartAccount: MOCK_SMART_ACCOUNT,
-        getHistory: vi.fn().mockResolvedValue([]),
+        getHistory: vi.fn().mockResolvedValue({ transactions: [], indexedHistoryUnavailable: false }),
         destroy: vi.fn(),
       };
       mockedCreateClient.mockResolvedValue(mockClient as never);
@@ -359,7 +360,7 @@ describe('account tools', () => {
       const mockClient = {
         address: MOCK_SMART_ACCOUNT,
         smartAccount: MOCK_SMART_ACCOUNT,
-        getHistory: vi.fn().mockResolvedValue([]),
+        getHistory: vi.fn().mockResolvedValue({ transactions: [], indexedHistoryUnavailable: false }),
         destroy: vi.fn(),
       };
       mockedCreateClient.mockResolvedValue(mockClient as never);
@@ -372,6 +373,28 @@ describe('account tools', () => {
 
       const { parsed } = parseResult(result);
       expect(parsed.data.transactions).toEqual([]);
+    });
+
+    it('surfaces indexedHistoryUnavailable + a note when history is degraded (F-5)', async () => {
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        smartAccount: MOCK_SMART_ACCOUNT,
+        // SDK degraded to a recent-only window because the RPC can't serve the full scan.
+        getHistory: vi.fn().mockResolvedValue({ transactions: [], indexedHistoryUnavailable: true }),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_history')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+      });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.success).toBe(true);
+      expect(parsed.data.indexedHistoryUnavailable).toBe(true);
+      expect(parsed.data.note).toMatch(/indexer/i);
     });
   });
 

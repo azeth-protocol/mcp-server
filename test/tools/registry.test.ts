@@ -268,6 +268,34 @@ describe('registry tools', () => {
       expect(scored.reputation.weightedValueFormatted).toBe('100');
     });
 
+    it('paginates by raw page size via nextOffset, not the deduped count (S-1)', async () => {
+      // A full raw page of `limit` entries that all dedupe to one (same owner+name)
+      // — the deduped count is below limit, but the server may still have more.
+      const owner = '0xowner1' as `0x${string}`;
+      const rawEntries: RegistryEntry[] = Array.from({ length: 10 }, (_, i) => ({
+        tokenId: BigInt(i + 1),
+        owner,
+        entityType: 'service' as const,
+        name: 'DupService',
+        description: '',
+        capabilities: ['price-feed'],
+        endpoint: 'https://x.example.com',
+        active: true,
+      }));
+      mockedDiscoverWithFallback.mockResolvedValue({ entries: rawEntries, source: 'server' });
+
+      const tool = server.tools.get('azeth_discover_services')!;
+      const result = await tool.handler({ chain: 'baseSepolia', limit: 10, offset: 0 });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.count).toBe(1); // deduped view
+      // hasMore stays true (full raw page ⇒ more may exist) — NOT derived from count,
+      // which would stop paging early and drop later results.
+      expect(parsed.data.hasMore).toBe(true);
+      // Callers advance by the raw page size, so dedup never causes overlap or loss.
+      expect(parsed.data.nextOffset).toBe(10);
+    });
+
     it('passes correct params to discoverServicesWithFallback', async () => {
       mockedDiscoverWithFallback.mockResolvedValue({
         entries: [],

@@ -404,14 +404,24 @@ export function registerRegistryTools(server: McpServer): void {
         }
 
         const requestedLimit = args.limit ?? 10;
-        // hasMore: true if the API returned a full page (before dedup), suggesting more results exist
-        const hasMore = result.entries.length >= requestedLimit;
+        const currentOffset = args.offset ?? 0;
+        // hasMore reflects offset-based SERVER pagination: a full raw page (before
+        // client-side dedup) means more results may exist at the next offset. It is
+        // intentionally NOT derived from the deduped `count` — dedup is a client-side
+        // view, and a deduped count below `limit` does not mean the server is
+        // exhausted, so basing hasMore on it would stop paging early and silently drop
+        // later results. nextOffset advances by the RAW page size for correct,
+        // lossless pagination — callers should page by nextOffset, not by count (S-1).
+        const rawPageSize = result.entries.length;
+        const hasMore = rawPageSize >= requestedLimit;
+        const nextOffset = hasMore ? currentOffset + rawPageSize : null;
 
         return success({
           count: uniqueEntries.length,
           hasMore,
+          nextOffset,
           source: result.source,
-          offset: args.offset ?? 0,
+          offset: currentOffset,
           limit: requestedLimit,
           ...(result.minReputationIgnored ? { warning: 'minReputation filter is not supported in on-chain fallback mode and was ignored.' } : {}),
           services: uniqueEntries.map((s) => ({
