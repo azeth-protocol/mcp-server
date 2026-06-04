@@ -403,6 +403,9 @@ export function registerAccountTools(server: McpServer): void {
               valueFormatted,
               token: tx.token ?? ZERO_ADDR,
               tokenSymbol: symbol,
+              // 'agreement' = recurring payment, 'transfer' = one-off (indexed path);
+              // omitted on the on-chain fallback.
+              ...(tx.type ? { type: tx.type } : {}),
               blockNumber: tx.blockNumber.toString(),
               timestamp: tx.timestamp,
               timestampISO,

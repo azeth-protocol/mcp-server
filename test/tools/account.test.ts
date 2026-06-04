@@ -310,6 +310,7 @@ describe('account tools', () => {
         value: 1000000n,
         blockNumber: 12345n,
         timestamp: '2026-02-17T10:00:00Z',
+        type: 'agreement',
       };
       const mockClient = {
         address: MOCK_SMART_ACCOUNT,
@@ -332,6 +333,8 @@ describe('account tools', () => {
       expect(parsed.data.transactions[0].hash).toBe('0xtx1');
       expect(parsed.data.transactions[0].value).toBe('1000000');
       expect(parsed.data.transactions[0].blockNumber).toBe('12345');
+      // Recurring-payment tag surfaced from the indexer's agreement_execution join.
+      expect(parsed.data.transactions[0].type).toBe('agreement');
       expect(parsed.data.indexedHistoryUnavailable).toBe(false);
       // Default limit = 10
       expect(mockClient.getHistory).toHaveBeenCalledWith({ limit: 10 }, undefined);
