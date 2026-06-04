@@ -50,16 +50,24 @@ describe('messaging tools', () => {
         destroy: vi.fn(),
       } as never);
 
-      const tool = server.tools.get('azeth_send_message')!;
-      const result = await tool.handler({
-        chain: 'baseSepolia',
-        to: 'not-an-address',
-        content: 'Hello agent!',
-      });
+      // Stub the discovery fetch to return no matches → resolution fails fast and
+      // deterministically. (A real network call hangs in CI until the test timeout.)
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) }) as never;
+      try {
+        const tool = server.tools.get('azeth_send_message')!;
+        const result = await tool.handler({
+          chain: 'baseSepolia',
+          to: 'not-an-address',
+          content: 'Hello agent!',
+        });
 
-      const { parsed, isError } = parseResult(result);
-      expect(isError).toBe(true);
-      expect(['NETWORK_ERROR', 'SERVICE_NOT_FOUND']).toContain(parsed.error.code);
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(['NETWORK_ERROR', 'SERVICE_NOT_FOUND']).toContain(parsed.error.code);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
 
     it('returns error when AZETH_PRIVATE_KEY is missing', async () => {
@@ -223,15 +231,23 @@ describe('messaging tools', () => {
         destroy: vi.fn(),
       } as never);
 
-      const tool = server.tools.get('azeth_check_reachability')!;
-      const result = await tool.handler({
-        chain: 'baseSepolia',
-        address: 'bad-addr',
-      });
+      // Stub the discovery fetch to return no matches → resolution fails fast and
+      // deterministically. (A real network call hangs in CI until the test timeout.)
+      const originalFetch = globalThis.fetch;
+      globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) }) as never;
+      try {
+        const tool = server.tools.get('azeth_check_reachability')!;
+        const result = await tool.handler({
+          chain: 'baseSepolia',
+          address: 'bad-addr',
+        });
 
-      const { parsed, isError } = parseResult(result);
-      expect(isError).toBe(true);
-      expect(['NETWORK_ERROR', 'SERVICE_NOT_FOUND']).toContain(parsed.error.code);
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(['NETWORK_ERROR', 'SERVICE_NOT_FOUND']).toContain(parsed.error.code);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
     });
 
     it('returns error when AZETH_PRIVATE_KEY is missing', async () => {

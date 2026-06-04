@@ -62,18 +62,26 @@ describe('azeth_transfer', () => {
       destroy: vi.fn(),
     } as never);
 
-    const tool = server.tools.get('azeth_transfer')!;
-    const result = await tool.handler({
-      privateKey: TEST_PRIVATE_KEY,
-      chain: 'baseSepolia',
-      to: 'not-an-address',
-      amount: '1.0',
-    });
+    // Stub the discovery fetch to return no matches → resolution fails fast and
+    // deterministically. (A real network call hangs in CI until the test timeout.)
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ data: [] }) }) as never;
+    try {
+      const tool = server.tools.get('azeth_transfer')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+        to: 'not-an-address',
+        amount: '1.0',
+      });
 
-    const { parsed, isError } = parseResult(result);
-    expect(isError).toBe(true);
-    // Name resolution fails with NETWORK_ERROR (server unreachable), SERVICE_NOT_FOUND, or ACCOUNT_NOT_FOUND
-    expect(['NETWORK_ERROR', 'SERVICE_NOT_FOUND', 'ACCOUNT_NOT_FOUND']).toContain(parsed.error.code);
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBe(true);
+      // No match → ACCOUNT_NOT_FOUND (account context), or SERVICE_NOT_FOUND/NETWORK_ERROR.
+      expect(['NETWORK_ERROR', 'SERVICE_NOT_FOUND', 'ACCOUNT_NOT_FOUND']).toContain(parsed.error.code);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
   });
 
   it('returns error for invalid token address', async () => {
