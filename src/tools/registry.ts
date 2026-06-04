@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { hexToString } from 'viem';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { discoverServicesWithFallback, getRegistryEntry } from '@azeth/sdk';
-import { AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS, formatTokenAmount, CATALOG_MAX_ENTRIES, CATALOG_MAX_PATH_LENGTH } from '@azeth/common';
+import { AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS, formatTokenAmount, isUsableEndpoint, CATALOG_MAX_ENTRIES, CATALOG_MAX_PATH_LENGTH } from '@azeth/common';
 import type { CatalogEntry, CatalogMethod } from '@azeth/common';
 import { TrustRegistryModuleAbi, ReputationModuleAbi } from '@azeth/common/abis';
 import { createClient, resolveChain, resolveViemChain, validateAddress } from '../utils/client.js';
@@ -176,7 +176,7 @@ function parseRegistryDataURI(uri: string): {
       capabilities: Array.isArray(meta.capabilities)
         ? meta.capabilities.filter((c): c is string => typeof c === 'string')
         : [],
-      endpoint: typeof meta.endpoint === 'string' ? meta.endpoint : undefined,
+      endpoint: typeof meta.endpoint === 'string' && meta.endpoint.trim() ? meta.endpoint.trim() : undefined,
       pricing: typeof meta.pricing === 'string' ? meta.pricing : undefined,
       catalog: parseCatalogFromMeta(meta.catalog),
     };
@@ -341,6 +341,10 @@ export function registerRegistryTools(server: McpServer): void {
             capability: args.capability,
             entityType: args.entityType as 'agent' | 'service' | 'infrastructure' | undefined,
             minReputation: args.minReputation,
+            // Default to reputation-desc ordering so the best provider is first — not raw
+            // token-id order (which surfaced zero-reputation placeholders ahead of real
+            // services). On-chain fallback can't reputation-rank (documented limitation). (F8)
+            sortByReputation: true,
             limit: args.limit ?? 10,
             offset: args.offset,
           },
@@ -446,6 +450,9 @@ export function registerRegistryTools(server: McpServer): void {
             description: s.description ?? '',
             capabilities: s.capabilities,
             endpoint: s.endpoint,
+            // Advisory: does the endpoint look like a real, callable public URL? false for
+            // blank, placeholder (example.com), or ephemeral tunnels (*.ngrok-free.app). (F8)
+            usableEndpoint: isUsableEndpoint(s.endpoint),
             pricing: s.pricing,
             catalog: s.catalog ?? null,
             active: s.active,
@@ -636,6 +643,7 @@ export function registerRegistryTools(server: McpServer): void {
           entityType: entry.entityType,
           capabilities: entry.capabilities,
           endpoint: entry.endpoint ?? null,
+          usableEndpoint: isUsableEndpoint(typeof entry.endpoint === 'string' ? entry.endpoint : undefined),
           pricing: entry.pricing ?? null,
           catalog: entry.catalog ?? null,
           active: entry.active,

@@ -449,13 +449,18 @@ export function registerPaymentTools(server: McpServer): void {
         'Set autoFeedback: true to automatically submit a reputation opinion based on service quality after payment.',
         'Note: autoFeedback defaults to false in MCP context (ephemeral client). Enable it if the MCP server has a bundler configured.',
         '',
-        'Returns: The response data, which service was used, how many attempts were needed, and payment details.',
+        'INTENT (recommended): pass `intent` (loose token(s)) or `params` (exact) to navigate providers that expose a CATALOG of many paid endpoints (e.g. price of BTC, ETH, XRP). Azeth matches your intent to the right priced route deterministically (no LLM, low latency) and pays it. On a miss the response is `{ paid:false, resolved:false, options:[…] }` — the menu of catalog entries and their valid param values — so you pick an exact value and retry in one shot.',
         '',
-        'Example: { "capability": "price-feed" } or { "capability": "translation", "maxAmount": "0.50", "method": "POST", "body": "{\"text\": \"hello\"}" }',
+        'Returns: The response data, which service was used, attempts, payment details, and (for catalog navigation) a `resolved` receipt of the entry + bound params.',
+        '',
+        'Example: { "capability": "price-feed", "intent": "bitcoin" }  →  pays the BTC price route and returns the data.',
+        'Example: { "capability": "price-feed", "params": { "coinId": "ethereum" } }   or   { "capability": "translation", "maxAmount": "0.50", "method": "POST", "body": "{\"text\": \"hello\"}" }',
       ].join('\n'),
       inputSchema: z.object({
         chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
         capability: z.string().min(1).max(256).describe('Service capability to discover (e.g., "price-feed", "market-data", "translation", "compute").'),
+        intent: z.union([z.string().max(256), z.array(z.string().max(256)).max(16)]).optional().describe('What you want, as loose token(s) (e.g. "bitcoin", or ["bitcoin","fresh"]). When the chosen provider serves a catalog of paid endpoints, these are matched deterministically against the catalog\'s param values to pick the concrete route. On a miss, the response returns the catalog "options" so you can retry with an exact value.'),
+        params: z.record(z.string(), z.string().max(512)).optional().describe('Precise catalog params (e.g. { "coinId": "bitcoin" }) — overrides intent. Use when you already know the provider\'s param names (e.g. from a prior "options" response).'),
         method: z.enum(['GET', 'POST', 'PUT', 'DELETE', 'PATCH']).optional().describe('HTTP method. Defaults to "GET".'),
         body: z.string().max(100_000).optional().describe('Request body for POST/PUT/PATCH requests (JSON string, max 100KB).'),
         maxAmount: z.string().max(32).optional().describe('Maximum USDC amount willing to pay per service (e.g., "1.00"). Rejects if service costs more.'),
@@ -487,6 +492,7 @@ export function registerPaymentTools(server: McpServer): void {
         // Disable autoFeedback in MCP context: the client is ephemeral (destroyed
         // after this call) and may not have a bundler URL for UserOp submission.
         // Feedback should be submitted by long-lived AzethKit instances instead.
+        const intent = Array.isArray(args.intent) ? args.intent : args.intent ? [args.intent] : undefined;
         const result = await client.smartFetch402(args.capability, {
           method: args.method,
           body: args.body,
@@ -497,6 +503,9 @@ export function registerPaymentTools(server: McpServer): void {
           // every connection hop, the same protection azeth_pay applies to user URLs.
           // Throwing makes smartFetch402 skip that service and try the next one. (F9)
           secureGuard,
+          // Intent-native catalog navigation (F6): resolve intent/params → concrete priced route.
+          intent,
+          params: args.params,
         });
 
         // Stream response body with size limit (same pattern as azeth_pay)
@@ -549,6 +558,8 @@ export function registerPaymentTools(server: McpServer): void {
           },
           attemptsCount: result.attemptsCount,
           autoFeedback: args.autoFeedback ?? false,
+          // Catalog-navigation receipt: which entry + bound params were paid for. (F6)
+          ...(result.resolved ? { resolved: result.resolved } : {}),
         });
       } catch (err) {
         if (err instanceof Error && /AA24/.test(err.message)) {
@@ -556,6 +567,21 @@ export function registerPaymentTools(server: McpServer): void {
             'Payment amount exceeds your standard spending limit.',
             { operation: 'smart_payment' },
           );
+        }
+        // Intent couldn't be resolved against any provider's catalog — return the MENU (not an
+        // error) so the agent picks a valid value and retries in one shot. (F6)
+        if (err instanceof AzethError && err.code === 'SERVICE_NOT_FOUND' && err.details
+            && Array.isArray((err.details as Record<string, unknown>)['options'])) {
+          const d = err.details as Record<string, unknown>;
+          return success({
+            paid: false,
+            resolved: false,
+            reason: 'intent_unresolved',
+            message: err.message,
+            capability: d['capability'],
+            intent: d['intent'],
+            options: d['options'],
+          });
         }
         // Format raw USDC amounts in guardian/payment errors for readability
         if (err instanceof AzethError && err.details) {
