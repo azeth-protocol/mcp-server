@@ -17,9 +17,12 @@ vi.mock('@azeth/sdk', () => ({
   discoverServicesWithFallback: vi.fn(),
 }));
 
-// Mock viem to avoid real RPC client creation
+// Mock viem to avoid real RPC client creation. The discover handler builds a public
+// client and reads getWeightedReputationAll per entry (N3 enrichment), so expose a
+// configurable readContract that tests can drive to simulate on-chain reputation.
+const { mockReadContract } = vi.hoisted(() => ({ mockReadContract: vi.fn() }));
 vi.mock('viem', () => ({
-  createPublicClient: vi.fn().mockReturnValue({}),
+  createPublicClient: vi.fn(() => ({ readContract: mockReadContract })),
   http: vi.fn(),
 }));
 
@@ -47,6 +50,7 @@ describe('registry tools', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    mockReadContract.mockReset(); // clear any per-test on-chain reputation impl
     registerRegistryTools(server);
   });
 
@@ -238,19 +242,16 @@ describe('registry tools', () => {
       expect(parsed.data.services[1].name).toBe('SwapBot');
     });
 
-    it('always returns reputation as an object, never a bare number (F-1)', async () => {
-      // tokenId 3 carries a numeric server score (0-100). On-chain enrichment is
-      // unavailable in this harness (mocked publicClient has no readContract), so
-      // before normalization the bare number leaked alongside object-shaped
-      // entries, making the array polymorphic.
-      const entriesWithScore: RegistryEntry[] = [
-        { ...mockEntries[0]!, tokenId: 3n, reputation: 100 },
-        { ...mockEntries[1]!, tokenId: 4n }, // no reputation field
+    it('returns reputation as the on-chain object for every entry, matching get_registry_entry (F-1/N3)', async () => {
+      const entries: RegistryEntry[] = [
+        { ...mockEntries[0]!, tokenId: 3n, reputation: 85 }, // server's lossy score — must NOT leak
+        { ...mockEntries[1]!, tokenId: 4n },
       ];
-      mockedDiscoverWithFallback.mockResolvedValue({
-        entries: entriesWithScore,
-        source: 'server',
-      });
+      mockedDiscoverWithFallback.mockResolvedValue({ entries, source: 'server' });
+      // getWeightedReputationAll(tid) → [weightedValue (WAD 1e18), totalWeight, opinionCount]
+      mockReadContract.mockImplementation(async ({ args }: { args: readonly bigint[] }) =>
+        args[0] === 3n ? [85_000000000000000000n, 1284529823641n, 1n] : [0n, 0n, 0n],
+      );
 
       const tool = server.tools.get('azeth_discover_services')!;
       const result = await tool.handler({ chain: 'baseSepolia' });
@@ -258,14 +259,59 @@ describe('registry tools', () => {
       const { parsed } = parseResult(result);
       expect(parsed.data.services).toHaveLength(2);
       for (const svc of parsed.data.services) {
+        // F-1 invariant: always an object, never a bare number
         expect(typeof svc.reputation).toBe('object');
         expect(svc.reputation).not.toBeNull();
         expect(typeof svc.reputation.weightedValue).toBe('string');
         expect(svc.reputation).toHaveProperty('opinionCount');
       }
-      // the numeric server score is preserved (as a string) in the object shape
+      // N3: WAD-scaled weightedValue + REAL counts (not the unscaled "85" with opinionCount "0")
       const scored = parsed.data.services.find((s: { tokenId: string }) => s.tokenId === '3');
-      expect(scored.reputation.weightedValueFormatted).toBe('100');
+      expect(scored.reputation.weightedValue).toBe('85000000000000000000');
+      expect(scored.reputation.weightedValueFormatted).toBe('85');
+      expect(scored.reputation.totalWeight).toBe('1284529823641');
+      expect(scored.reputation.opinionCount).toBe('1');
+    });
+
+    it('enriches reputation on-chain for ALL entries regardless of result-set size (>10) (N3)', async () => {
+      // 12 entries (>10): the old ≤10 gate skipped enrichment here and leaked the server's
+      // lossy 0-100 score (unscaled, counts=0). Every entry must now carry the on-chain object.
+      const many: RegistryEntry[] = Array.from({ length: 12 }, (_, i) => ({
+        ...mockEntries[0]!,
+        tokenId: BigInt(100 + i),
+        owner: ('0x' + (100 + i).toString(16).padStart(40, '0')) as `0x${string}`,
+        name: `svc-${i}`,
+        reputation: 50, // lossy server score — must NOT appear in the output
+      }));
+      mockedDiscoverWithFallback.mockResolvedValue({ entries: many, source: 'server' });
+      mockReadContract.mockResolvedValue([42_000000000000000000n, 999n, 3n]);
+
+      const tool = server.tools.get('azeth_discover_services')!;
+      const result = await tool.handler({ chain: 'baseSepolia', limit: 20 });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.services).toHaveLength(12);
+      for (const svc of parsed.data.services) {
+        expect(svc.reputation.weightedValue).toBe('42000000000000000000'); // WAD, not "50"
+        expect(svc.reputation.opinionCount).toBe('3'); // real count, not "0"
+      }
+    });
+
+    it('falls back to zero reputation (honest) when the on-chain read fails, never the server score (N3)', async () => {
+      mockedDiscoverWithFallback.mockResolvedValue({
+        entries: [{ ...mockEntries[0]!, tokenId: 7n, reputation: 88 }],
+        source: 'server',
+      });
+      mockReadContract.mockRejectedValue(new Error('rpc down'));
+
+      const tool = server.tools.get('azeth_discover_services')!;
+      const result = await tool.handler({ chain: 'baseSepolia' });
+
+      const { parsed } = parseResult(result);
+      const svc = parsed.data.services[0];
+      expect(svc.reputation.weightedValue).toBe('0');
+      expect(svc.reputation.opinionCount).toBe('0');
+      expect(svc.reputation.weightedValueFormatted).not.toBe('88');
     });
 
     it('paginates by raw page size via nextOffset, not the deduped count (S-1)', async () => {

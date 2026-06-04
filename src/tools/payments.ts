@@ -1,12 +1,14 @@
 import { z } from 'zod';
-import { URL } from 'node:url';
-import dns from 'node:dns/promises';
 import { isAddress, parseUnits } from 'viem';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AzethError, AZETH_CONTRACTS, TOKENS, formatTokenAmount } from '@azeth/common';
 import type { AzethKit } from '@azeth/sdk';
-import { secureFetch, type SecureFetchGuard } from '@azeth/sdk';
+// F11: the SSRF guard is now a single audited implementation in @azeth/sdk (the SDK client
+// methods inject it by default). Import it here for the pay/subscribe pre-flight, and re-export
+// createPinnedLookup so existing tests keep importing it from this module.
+import { secureFetch, createDefaultSsrfGuard, validateExternalUrl, type ValidatedUrl } from '@azeth/sdk';
+export { createPinnedLookup } from '@azeth/sdk';
 import { createClient, resolveChain, validateAddress } from '../utils/client.js';
 import { resolveAddress } from '../utils/resolve.js';
 import { success, error, handleError, guardianRequiredError } from '../utils/response.js';
@@ -14,46 +16,10 @@ import { success, error, handleError, guardianRequiredError } from '../utils/res
 /** Maximum response body size returned to the MCP caller (100 KB) */
 const MAX_RESPONSE_SIZE = 100_000;
 
-/** Check if an IPv4 address is in a private/reserved range */
-function isPrivateIPv4(ip: string): boolean {
-  const parts = ip.split('.').map(Number);
-  if (parts.length !== 4 || parts.some(p => isNaN(p))) return false;
-  const [a, b] = parts;
-  return (
-    a === 127 ||                           // loopback
-    a === 10 ||                            // 10.0.0.0/8
-    (a === 172 && b! >= 16 && b! <= 31) || // 172.16.0.0/12
-    (a === 192 && b === 168) ||            // 192.168.0.0/16
-    (a === 169 && b === 254) ||            // link-local
-    a === 0                                // 0.0.0.0/8
-  );
-}
+/** Single audited SSRF guard for untrusted outbound HTTP (x402 targets + registry-discovered
+ *  endpoints), shared with the SDK client methods. (F9/F11) */
+const secureGuard = createDefaultSsrfGuard();
 
-/** Check if an IPv6 address is in a private/reserved range */
-function isPrivateIPv6(ip: string): boolean {
-  const lower = ip.toLowerCase();
-  return (
-    lower === '::1' ||
-    lower.startsWith('fc') ||
-    lower.startsWith('fd') ||
-    lower.startsWith('fe80') ||
-    lower.startsWith('::ffff:127.') ||
-    lower.startsWith('::ffff:10.') ||
-    lower.startsWith('::ffff:172.16.') || lower.startsWith('::ffff:172.17.') ||
-    lower.startsWith('::ffff:172.18.') || lower.startsWith('::ffff:172.19.') ||
-    lower.startsWith('::ffff:172.20.') || lower.startsWith('::ffff:172.21.') ||
-    lower.startsWith('::ffff:172.22.') || lower.startsWith('::ffff:172.23.') ||
-    lower.startsWith('::ffff:172.24.') || lower.startsWith('::ffff:172.25.') ||
-    lower.startsWith('::ffff:172.26.') || lower.startsWith('::ffff:172.27.') ||
-    lower.startsWith('::ffff:172.28.') || lower.startsWith('::ffff:172.29.') ||
-    lower.startsWith('::ffff:172.30.') || lower.startsWith('::ffff:172.31.') ||
-    lower.startsWith('::ffff:192.168.') ||
-    lower.startsWith('::ffff:169.254.') ||
-    lower.startsWith('::ffff:0.') ||
-    lower === '::' ||
-    lower === '::ffff:0.0.0.0'
-  );
-}
 
 /**
  * Safely truncate a string without splitting surrogate pairs.
@@ -69,171 +35,6 @@ function safeTruncate(str: string, maxLength: number): string {
   return str.slice(0, end) + '... [truncated]';
 }
 
-/**
- * Validated URL with pinned IP addresses to prevent DNS rebinding.
- * HIGH-7 fix: The resolved IPs are captured at validation time and should be used
- * for the actual connection to prevent TOCTOU DNS rebinding attacks.
- */
-export interface ValidatedUrl {
-  url: string;
-  /** Pinned IPv4 addresses resolved at validation time */
-  pinnedIPv4: string[];
-}
-
-/**
- * Validate that a URL is external (HTTPS, not pointing to internal/private addresses).
- * F-9: Resolves hostname via DNS to catch rebinding bypasses.
- * HIGH-7 fix: Returns pinned IPs for the caller to use when making the actual request.
- */
-async function validateExternalUrl(urlStr: string): Promise<ValidatedUrl> {
-  const url = new URL(urlStr);
-
-  if (url.protocol !== 'https:') {
-    throw new AzethError('URL must use HTTPS', 'INVALID_INPUT');
-  }
-
-  const hostname = url.hostname.toLowerCase();
-
-  // String-based blocklist for obvious patterns (fast path)
-  const blockedPatterns = [
-    'localhost', '127.0.0.1', '0.0.0.0', '::1',
-    '169.254.', '10.', '172.16.', '172.17.', '172.18.', '172.19.',
-    '172.20.', '172.21.', '172.22.', '172.23.', '172.24.', '172.25.',
-    '172.26.', '172.27.', '172.28.', '172.29.', '172.30.', '172.31.',
-    '192.168.', 'fc00:', 'fd00:', 'fe80:',
-    '::ffff:127.', '::ffff:10.', '::ffff:172.16.', '::ffff:192.168.',
-    '::ffff:169.254.',
-  ];
-
-  for (const pattern of blockedPatterns) {
-    if (hostname === pattern || hostname.startsWith(pattern)) {
-      throw new AzethError(
-        'URL points to an internal or private network address. Only public HTTPS URLs are allowed.',
-        'INVALID_INPUT',
-      );
-    }
-  }
-
-  // F-9 / C-1 / HIGH-7: Resolve the hostname and reject any private/reserved address
-  // (DNS-rebinding / alternative-encoding bypasses), checking BOTH A and AAAA records.
-  //
-  // Resolve via getaddrinfo (dns.lookup) — the SAME resolver the HTTP client and the
-  // actual connection use — NOT dns.resolve4/6 (c-ares direct nameserver queries). c-ares
-  // spuriously fails in restricted-DNS / sandboxed environments where getaddrinfo (and
-  // therefore the request itself) succeeds, and it can resolve differently than the
-  // connection (a TOCTOU gap). `{ all: true }` returns every A and AAAA record at once.
-  let resolved: Array<{ address: string; family: number }>;
-  try {
-    resolved = await dns.lookup(hostname, { all: true });
-  } catch (err) {
-    // C-3: DNS resolution failure must REJECT — cannot verify URL safety (fail closed).
-    // Differentiate "hostname doesn't exist" (input error) from "DNS unreachable" (network).
-    const dnsErr = err as NodeJS.ErrnoException;
-    if (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA' || dnsErr.code === 'ENOENT') {
-      throw new AzethError(
-        'Hostname not found — verify the URL is correct',
-        'INVALID_INPUT',
-        { hostname: url.hostname },
-      );
-    }
-    throw new AzethError(
-      'DNS resolution failed — cannot verify URL safety',
-      'NETWORK_ERROR',
-      { hostname: url.hostname, cause: 'dns' },
-    );
-  }
-
-  if (resolved.length === 0) {
-    throw new AzethError(
-      'Hostname not found — verify the URL is correct',
-      'INVALID_INPUT',
-      { hostname: url.hostname },
-    );
-  }
-
-  // Reject if ANY resolved address is private/reserved; pin the public IPv4s.
-  const pinnedIPv4: string[] = [];
-  for (const { address, family } of resolved) {
-    if (family === 6) {
-      if (isPrivateIPv6(address)) {
-        throw new AzethError(
-          'URL resolves to a private or reserved IPv6 address. Only public HTTPS URLs are allowed.',
-          'INVALID_INPUT',
-        );
-      }
-    } else {
-      if (isPrivateIPv4(address)) {
-        throw new AzethError(
-          'URL resolves to a private or reserved IP address. Only public HTTPS URLs are allowed.',
-          'INVALID_INPUT',
-        );
-      }
-      pinnedIPv4.push(address);
-    }
-  }
-
-  return { url: urlStr, pinnedIPv4 };
-}
-
-/** Lazily load undici's `Agent` (an OPTIONAL dependency). undici is Node's built-in HTTP
- *  engine, but it must be installed as a package to construct a custom connection
- *  dispatcher. If unavailable, the connection pin is skipped — validate + redirect-refusal
- *  still apply (graceful degradation). */
-let agentCtorPromise: Promise<(new (opts: unknown) => unknown) | undefined> | undefined;
-function loadAgentCtor(): Promise<(new (opts: unknown) => unknown) | undefined> {
-  if (!agentCtorPromise) {
-    // `as string` keeps this a runtime-only dynamic import so the build does not require
-    // undici's type declarations to be present.
-    agentCtorPromise = import('undici' as string)
-      .then((m: { Agent?: new (opts: unknown) => unknown }) => m.Agent)
-      .catch(() => undefined);
-  }
-  return agentCtorPromise;
-}
-
-/** Build a connection dispatcher pinned to the already-validated public IPv4 address(es).
- *  Closes the DNS-rebinding TOCTOU: after validateExternalUrl confirms the host resolves to
- *  public IPs, the actual connection is pinned to those IPs and cannot be re-resolved to a
- *  private target. TLS SNI / certificate validation still uses the URL hostname. Returns
- *  undefined when there is nothing to pin (e.g. IPv6-only host) or undici is unavailable —
- *  the request then proceeds with validate-only protection. (F9) */
-/** A net.LookupFunction-compatible resolver that pins DNS resolution to the given
- *  already-validated public IPv4 address(es), ignoring the hostname. This is what makes
- *  the connection immune to DNS rebinding: no matter what an attacker-controlled DNS
- *  record returns at connect time, the socket only ever connects to the pre-validated IPs.
- *  Supports both the single-address and `{ all }` callback forms. Exported for tests. (F9) */
-export function createPinnedLookup(
-  pinnedIPv4: string[],
-): (
-  hostname: string,
-  opts: { all?: boolean } | undefined,
-  cb: (err: Error | null, address: unknown, family?: number) => void,
-) => void {
-  return (_hostname, opts, cb): void => {
-    if (opts?.all) cb(null, pinnedIPv4.map((address) => ({ address, family: 4 })));
-    else cb(null, pinnedIPv4[0], 4);
-  };
-}
-
-async function buildPinnedDispatcher(pinnedIPv4: string[]): Promise<unknown | undefined> {
-  if (pinnedIPv4.length === 0) return undefined;
-  const AgentCtor = await loadAgentCtor();
-  if (!AgentCtor) return undefined;
-  try {
-    return new AgentCtor({ connect: { lookup: createPinnedLookup(pinnedIPv4) } });
-  } catch {
-    return undefined;
-  }
-}
-
-/** SSRF guard injected into the SDK's secureFetch for untrusted URLs (x402 targets,
- *  registry-discovered endpoints): validates the URL (HTTPS, non-private/reserved IP,
- *  DNS-resolvable) and returns a connection dispatcher pinned to the validated IPs.
- *  Throws (AzethError) to BLOCK the request. (F9) */
-const secureGuard: SecureFetchGuard = async (urlStr: string) => {
-  const validated = await validateExternalUrl(urlStr);
-  return { dispatcher: await buildPinnedDispatcher(validated.pinnedIPv4) };
-};
 
 /**
  * Apply smart account selection from the `smartAccount` tool parameter.
@@ -289,7 +90,7 @@ export function registerPaymentTools(server: McpServer): void {
         'The tool automatically detects if you have an active payment agreement (subscription) with the service.',
         'If an agreement exists, access is granted without additional payment. Otherwise, a fresh USDC payment is signed.',
         '',
-        'Returns: Whether payment was made, the payment method used (x402/session/none), the HTTP status, and the response body.',
+        'Returns: Whether payment was made, the payment method used ("smart-account" for a fresh smart-account settlement, "session" for SIWx-granted access incl. an active agreement, "x402" for a direct EOA settlement, or "none"), the HTTP status, and the response body.',
         '',
         'Note: Requires USDC balance to pay (unless an agreement grants access). Set maxAmount to cap spending.',
         'Only HTTPS URLs to public endpoints are accepted. The payer account is determined by the AZETH_PRIVATE_KEY environment variable.',
@@ -387,6 +188,9 @@ export function registerPaymentTools(server: McpServer): void {
         return success({
           paid: result.paymentMade,
           amount: result.amount?.toString(),
+          // A1: x402 settlement is always USDC (enforced in the SDK), so render a
+          // human-readable amount alongside the raw 6-decimal integer.
+          ...(result.amount !== undefined ? { amountFormatted: `${formatTokenAmount(result.amount, 6)} USDC` } : {}),
           paymentMethod: result.paymentMethod,
           statusCode: result.response.status,
           body: truncatedBody,
@@ -449,7 +253,7 @@ export function registerPaymentTools(server: McpServer): void {
         'Set autoFeedback: true to automatically submit a reputation opinion based on service quality after payment.',
         'Note: autoFeedback defaults to false in MCP context (ephemeral client). Enable it if the MCP server has a bundler configured.',
         '',
-        'INTENT (recommended): pass `intent` (loose token(s)) or `params` (exact) to navigate providers that expose a CATALOG of many paid endpoints (e.g. price of BTC, ETH, XRP). Azeth matches your intent to the right priced route deterministically (no LLM, low latency) and pays it. On a miss the response is `{ paid:false, resolved:false, options:[…] }` — the menu of catalog entries and their valid param values — so you pick an exact value and retry in one shot.',
+        'INTENT (recommended): pass `intent` (loose token(s)) or `params` (exact) to get exactly the asset/resource you want. Azeth matches your intent deterministically (no LLM, low latency): for a provider that exposes a CATALOG of many paid endpoints (e.g. price of BTC, ETH, XRP) it navigates to the right priced route; for a provider with a single fixed priced route it pays only when the asset you named appears in that route. SAFETY GUARANTEE: with an intent set, smart_pay NEVER spends on a non-matching asset — on a miss it returns `{ paid:false, resolved:false, options:[…] }` (the catalog menu + valid param values), so you refine and retry in one shot with no money spent on the wrong thing.',
         '',
         'Returns: The response data, which service was used, attempts, payment details, and (for catalog navigation) a `resolved` receipt of the entry + bound params.',
         '',
@@ -547,6 +351,8 @@ export function registerPaymentTools(server: McpServer): void {
         return success({
           paid: result.paymentMade,
           amount: result.amount?.toString(),
+          // A1: human-readable USDC amount alongside the raw integer.
+          ...(result.amount !== undefined ? { amountFormatted: `${formatTokenAmount(result.amount, 6)} USDC` } : {}),
           paymentMethod: result.paymentMethod,
           statusCode: result.response.status,
           body: truncatedBody,
@@ -893,7 +699,9 @@ export function registerPaymentTools(server: McpServer): void {
         // count cap (maxExecutions) nor an amount cap (totalCap), default totalCap to
         // ~1 year of payments by amount so a url-only subscribe succeeds with a
         // bounded, predictable ceiling instead of being rejected (OBS-4). A provided
-        // maxExecutions is left to the SDK's amount * maxExecutions default.
+        // maxExecutions is left to the SDK's pure-count default (totalCap=0 ⇒ the
+        // subscription completes after exactly maxExecutions payments — its documented
+        // "count cap" semantics), so we only default the amount cap here.
         if (!args.maxExecutions && totalCap === undefined) {
           totalCap = amount * 365n;
         }
@@ -915,9 +723,13 @@ export function registerPaymentTools(server: McpServer): void {
               payee: terms.payee,
               token: terms.token,
               amountPerInterval: terms.minAmountPerInterval,
+              // A1: human-readable USDC amounts alongside the raw 6-decimal integers.
+              amountPerIntervalFormatted: `${formatTokenAmount(amount, 6)} USDC`,
               intervalSeconds: interval,
               maxExecutions: args.maxExecutions ?? 0,
-              ...(totalCap !== undefined ? { totalCap: totalCap.toString() } : {}),
+              ...(totalCap !== undefined
+                ? { totalCap: totalCap.toString(), totalCapFormatted: `${formatTokenAmount(totalCap, 6)} USDC` }
+                : {}),
               serviceUrl: args.url,
             },
           },

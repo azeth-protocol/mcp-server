@@ -229,6 +229,32 @@ describe('payment tools', () => {
       );
     });
 
+    it('renders a human-readable amountFormatted on a paid settlement (A1)', async () => {
+      const mockResponse = mockResponseWithBody('{"price":1777}', 200);
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        fetch402: vi.fn().mockResolvedValue({
+          paymentMade: true,
+          amount: 10000n, // 0.01 USDC (6-dec)
+          paymentMethod: 'smart-account',
+          response: mockResponse,
+        }),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_pay')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+        url: 'https://api.example.com/data',
+      });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.amount).toBe('10000');
+      expect(parsed.data.amountFormatted).toBe('0.01 USDC');
+    });
+
     it('handles when no payment was required', async () => {
       const mockResponse = mockResponseWithBody('free content', 200);
       const mockClient = {

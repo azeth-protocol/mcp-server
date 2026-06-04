@@ -70,15 +70,38 @@ function formatOverdue(seconds: number): string {
   return formatCountdown(seconds);
 }
 
-/** Derive agreement status from on-chain data */
+/** Derive agreement status from on-chain data.
+ *
+ *  N4: the contract has NO distinct "completed" flag — it only flips `active=false` and emits
+ *  `AgreementCompleted` when a terminal condition is hit. Completion can be reached by EITHER
+ *  the execution count (`executionCount >= maxExecutions`) OR exhausting the amount budget
+ *  (`totalPaid >= totalCap`) — pro-rata accrual can drain the cap before the count is reached.
+ *  We must infer BOTH, otherwise a cap-exhausted agreement is wrongly labelled "cancelled"
+ *  (which also makes the "completed" filter dead and contradicts execute_agreement).
+ */
 function deriveStatus(
-  agreement: { active: boolean; maxExecutions: bigint; executionCount: bigint; endTime: bigint },
+  agreement: {
+    active: boolean;
+    maxExecutions: bigint;
+    executionCount: bigint;
+    endTime: bigint;
+    totalCap: bigint;
+    totalPaid: bigint;
+  },
   now: bigint,
 ): 'active' | 'completed' | 'cancelled' | 'expired' {
+  // A pure-count agreement (totalCap == 0) that reaches maxExecutions is left
+  // active == true on-chain — the contract only flips `active` on totalCap exhaustion.
+  // So infer completion from EITHER terminal condition regardless of the on-chain flag;
+  // otherwise a count-exhausted agreement is mislabelled "active" forever (a zombie that
+  // pollutes the "active" filter, is excluded from "completed", and reports 1970-epoch
+  // "overdue" timing in get_agreement while canExecute is false). C2.
+  const countDone = agreement.maxExecutions !== 0n && agreement.executionCount >= agreement.maxExecutions;
+  const budgetDone = agreement.totalCap !== 0n && agreement.totalPaid >= agreement.totalCap;
+  if (countDone || budgetDone) {
+    return 'completed';
+  }
   if (!agreement.active) {
-    if (agreement.maxExecutions !== 0n && agreement.executionCount >= agreement.maxExecutions) {
-      return 'completed';
-    }
     return 'cancelled';
   }
   if (agreement.endTime !== 0n && agreement.endTime <= now) {
@@ -298,11 +321,13 @@ export function registerAgreementTools(server: McpServer): void {
           // Non-fatal: if balance check fails, proceed and let the contract validate
         }
 
-        // Capture pre-execution totalPaid as fallback for delta calculation
+        // Capture pre-execution counters as the read-after-write race baseline.
         let preExecutionTotal = 0n;
+        let preExecutionCount = 0n;
         try {
           const preExecAgreement = await client.getAgreement(agreementId, account);
           preExecutionTotal = preExecAgreement.totalPaid;
+          preExecutionCount = preExecAgreement.executionCount;
         } catch {
           // Non-fatal: delta fallback won't be available
         }
@@ -339,20 +364,21 @@ export function registerAgreementTools(server: McpServer): void {
         // Enrich response with post-execution state.
         // F2: guard against a read-after-write race. A load-balanced RPC node can serve
         // this getAgreement from a block that predates the just-mined UserOp, returning
-        // stale executionCount / totalPaid / remainingBudget (the on-chain state is
-        // correct; only this read lagged). When a payment was made (executionAmount > 0)
-        // but the read's totalPaid hasn't advanced to include it, re-read with a short
-        // backoff until the node reflects this execution — fixing all derived fields atomically.
+        // stale executionCount / totalPaid / active / remainingBudget (the on-chain state
+        // is correct; only this read lagged). The execution tx is mined, so executionCount
+        // MUST have incremented — re-read with a short backoff until the node reflects it.
+        // Keying on executionCount (not just totalPaid) makes ALL derived fields consistent
+        // and works even when the PaymentExecuted event amount couldn't be parsed.
         let agreement = await client.getAgreement(agreementId, account);
-        if (executionAmount > 0n) {
-          for (
-            let attempt = 0;
-            attempt < 5 && agreement.totalPaid < preExecutionTotal + executionAmount;
-            attempt++
-          ) {
-            await new Promise((resolve) => setTimeout(resolve, 300));
-            agreement = await client.getAgreement(agreementId, account);
-          }
+        for (
+          let attempt = 0;
+          attempt < 5 &&
+            (agreement.executionCount <= preExecutionCount ||
+              (executionAmount > 0n && agreement.totalPaid < preExecutionTotal + executionAmount));
+          attempt++
+        ) {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          agreement = await client.getAgreement(agreementId, account);
         }
         const decimals = tokenDecimals(agreement.token, chain);
         const tokenSymbol = resolveTokenSymbol(agreement.token, chain);
@@ -367,8 +393,10 @@ export function registerAgreementTools(server: McpServer): void {
         let nextExecutionTime: string;
         let nextExecutionIn: string;
         if (status !== 'active') {
-          nextExecutionTime = 'completed';
-          nextExecutionIn = 'N/A (completed)';
+          // N4: report the actual terminal status (completed/cancelled/expired) so this matches
+          // get_agreement / list_agreements instead of always claiming "completed".
+          nextExecutionTime = status;
+          nextExecutionIn = `N/A (${status})`;
         } else {
           try {
             const nextTime = await client.getNextExecutionTime(agreementId, account);
@@ -587,8 +615,10 @@ export function registerAgreementTools(server: McpServer): void {
         const status = deriveStatus(agreement, now);
         const intervalSecs = Number(agreement.interval);
 
-        // Timing
-        const lastExecutedAt = agreement.lastExecuted === 0n
+        // Timing. M3: executionCount === 0 is the real "never executed" signal — the
+        // contract seeds lastExecuted with the creation time at setup (so the first interval
+        // schedules from creation), so lastExecuted is never 0n even before any execution.
+        const lastExecutedAt = agreement.executionCount === 0n
           ? null
           : new Date(Number(agreement.lastExecuted) * 1000).toISOString();
 
@@ -616,10 +646,12 @@ export function registerAgreementTools(server: McpServer): void {
           } else {
             nextExecutionIn = formatCountdown(diff);
           }
+        }
 
-          if (!executable && reason) {
-            canExecuteReason = reason;
-          }
+        // Prefer the contract's own reason whenever it deems the agreement non-executable —
+        // regardless of derived status (a cancelled/completed agreement still has one).
+        if (!executable && reason) {
+          canExecuteReason = reason;
         }
 
         // canExecute must reflect whether `execute` would succeed RIGHT NOW: the
@@ -628,6 +660,15 @@ export function registerAgreementTools(server: McpServer): void {
         // `executable` alone misled consumers — a not-yet-due agreement showed
         // canExecute:true while execute() rejects it with "not due yet" (S-5).
         const canExecute = executable && isDue;
+
+        // M4: always surface WHY when not executable. The contract `reason` (above) covers
+        // the !executable cases; when the agreement is structurally executable but simply
+        // not due yet (canExecute=false via isDue=false), fill in a human reason too.
+        if (!canExecute && !canExecuteReason) {
+          canExecuteReason = status !== 'active'
+            ? `Agreement is ${status}`
+            : `Interval not elapsed — next execution ${nextExecutionIn}`;
+        }
 
         // Payee name resolution
         const payeeName = await lookupPayeeName(client, agreement.payee);

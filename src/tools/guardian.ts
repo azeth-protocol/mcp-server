@@ -1,11 +1,10 @@
 import { z } from 'zod';
-import { formatUnits } from 'viem';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { AZETH_CONTRACTS, TOKENS } from '@azeth/common';
 import { GuardianModuleAbi } from '@azeth/common/abis';
 import { createClient, resolveChain, validateAddress } from '../utils/client.js';
 import { resolveSmartAccount } from '../utils/resolve.js';
-import { success, error, handleError, guardianRequiredError } from '../utils/response.js';
+import { success, error, handleError, guardianRequiredError, formatUSD } from '../utils/response.js';
 
 /** Register guardian MCP tools: azeth_get_guardrails, azeth_whitelist_protocol */
 export function registerGuardianTools(server: McpServer): void {
@@ -145,15 +144,17 @@ export function registerGuardianTools(server: McpServer): void {
         return success({
           account,
           spendingLimits: {
-            maxTransactionUSD: `$${formatUnits(g.maxTxAmountUSD, 18)}`,
-            dailySpendLimitUSD: `$${formatUnits(dailyLimit, 18)}`,
-            dailySpentUSD: `$${formatUnits(dailySpent, 18)}`,
-            dailyRemainingUSD: `$${formatUnits(dailyRemaining, 18)}`,
+            // M1: 2-decimal adaptive USD (formatUSD) instead of raw 18-decimal formatUnits,
+            // matching every other USD field in the API.
+            maxTransactionUSD: formatUSD(g.maxTxAmountUSD),
+            dailySpendLimitUSD: formatUSD(dailyLimit),
+            dailySpentUSD: formatUSD(dailySpent),
+            dailyRemainingUSD: formatUSD(dailyRemaining),
             dailyPercentUsed: `${dailyPercentUsed.toFixed(1)}%`,
           },
           guardianLimits: {
-            guardianMaxTransactionUSD: `$${formatUnits(g.guardianMaxTxAmountUSD, 18)}`,
-            guardianDailySpendLimitUSD: `$${formatUnits(g.guardianDailySpendLimitUSD, 18)}`,
+            guardianMaxTransactionUSD: formatUSD(g.guardianMaxTxAmountUSD),
+            guardianDailySpendLimitUSD: formatUSD(g.guardianDailySpendLimitUSD),
           },
           guardian: g.guardian,
           emergencyWithdrawTo: g.emergencyWithdrawTo,

@@ -26,19 +26,6 @@ const DEFAULT_REPUTATION: ReputationSummary = {
   opinionCount: '0',
 };
 
-/** Coerce a RegistryEntry's `reputation` — an optional 0-100 numeric score from
- *  the server (absent for on-chain results) — into the uniform ReputationSummary
- *  object. Without this, entries that skip on-chain enrichment (>10 results, or
- *  enrichment failures) leak the bare number while enriched entries are objects,
- *  making the response array polymorphic and unparseable for AI consumers (F-1). */
-function normalizeReputation(score: number | undefined): ReputationSummary {
-  if (typeof score === 'number') {
-    const formatted = score.toString();
-    return { ...DEFAULT_REPUTATION, weightedValue: formatted, weightedValueFormatted: formatted };
-  }
-  return DEFAULT_REPUTATION;
-}
-
 /** Minimal ABI for ERC-8004 tokenURI (read-only) */
 const ERC8004_TOKEN_URI_ABI = [
   {
@@ -311,7 +298,7 @@ export function registerRegistryTools(server: McpServer): void {
         'Returns: Array of registry entries with token ID, owner, entity type, name, capabilities, endpoint, and status.',
         '',
         'Note: This queries the Azeth server API. Set AZETH_SERVER_URL env var if the server is not at the default location.',
-        'When minReputation is provided, results are filtered and ranked by reputation (highest first); otherwise they are returned in registry order. No private key is required for read-only discovery.',
+        'Results are ranked by reputation (highest first) by default; pass minReputation to also filter out providers below a threshold. Each result carries a usableEndpoint flag (false for blank/placeholder/ephemeral-tunnel endpoints). No private key is required for read-only discovery.',
         '',
         'Example: { "capability": "price-feed" } or { "entityType": "service", "minReputation": 50, "limit": 5 }',
       ].join('\n'),
@@ -379,12 +366,15 @@ export function registerRegistryTools(server: McpServer): void {
           );
         }
 
-        // ── Optional reputation enrichment ──
-        // For small result sets (≤10), fetch weighted reputation for each entry.
-        // Non-fatal: if reputation is unavailable for any entry, it's set to null.
+        // ── Reputation enrichment (N3) ──
+        // Fetch on-chain weighted reputation for EVERY returned entry (reads are parallel,
+        // bounded by the page `limit`). This reuses the exact getWeightedReputationAll read
+        // and formatter that azeth_get_registry_entry uses, so the two endpoints always agree.
+        // The previous ≤10 gate left larger result sets falling back to the server's lossy
+        // 0-100 score (unscaled weightedValue, opinionCount/totalWeight hardcoded to 0), so the
+        // same agent's reputation flipped with the result-set size. Non-fatal per entry.
         const reputationModuleAddr = AZETH_CONTRACTS[chainName].reputationModule;
-        const shouldEnrich = uniqueEntries.length <= 10
-          && !!reputationModuleAddr
+        const shouldEnrich = !!reputationModuleAddr
           && reputationModuleAddr !== ('' as `0x${string}`);
         const reputationMap = new Map<string, ReputationSummary>();
 
@@ -456,7 +446,10 @@ export function registerRegistryTools(server: McpServer): void {
             pricing: s.pricing,
             catalog: s.catalog ?? null,
             active: s.active,
-            reputation: reputationMap.get(String(s.tokenId)) ?? normalizeReputation(s.reputation),
+            // N3: always the on-chain object (or DEFAULT zeros if the read failed) — never
+            // the server's lossy 0-100 score, so reputation is consistent across endpoints
+            // and result-set sizes.
+            reputation: reputationMap.get(String(s.tokenId)) ?? DEFAULT_REPUTATION,
           })),
         });
       } catch (err) {

@@ -425,6 +425,111 @@ describe('agreement tools', () => {
       // Previously canExecute leaked the contract's `executable` (true), so it
       // claimed canExecute:true while execute() rejects the not-yet-due agreement.
       expect(parsed.data.canExecute).toBe(false);
+      // M4: canExecute=false must always carry a reason — here the agreement is
+      // structurally executable but simply not due, which the contract `reason` omits.
+      expect(parsed.data.canExecuteReason).toContain('Interval not elapsed');
+    });
+
+    it('labels a cap-exhausted agreement "completed", not "cancelled" (N4)', async () => {
+      // Hit the amount budget (totalPaid >= totalCap) with executionCount < maxExecutions —
+      // the pro-rata accrual case. Must read as completed, never cancelled.
+      const agreement = mockAgreement({
+        active: false,
+        maxExecutions: 3n,
+        executionCount: 1n,
+        totalCap: 30000000000000n,
+        totalPaid: 30000000000000n,
+      });
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(mockAgreementData(agreement, { executable: false, reason: 'completed' })),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_agreement')!;
+      const result = await tool.handler({ chain: 'baseSepolia', account: MOCK_SMART_ACCOUNT, agreementId: 0 });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.status).toBe('completed');
+    });
+
+    it('labels a count-exhausted pure-count agreement "completed" and suppresses zombie timing (C2)', async () => {
+      // Pure-count agreement (totalCap == 0) that reached maxExecutions. The contract
+      // leaves active == true and returns nextExecutionTime == 0 (epoch) — which
+      // previously surfaced as status "active", isDue true, and 1970-01-01 /
+      // "overdue by ~494612 hours" timing while canExecute was false. It must read as a
+      // completed agreement with N/A timing (and not appear under the "active" filter).
+      const agreement = mockAgreement({
+        active: true,
+        maxExecutions: 3n,
+        executionCount: 3n,
+        totalCap: 0n,
+      });
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(
+          mockAgreementData(agreement, {
+            executable: false,
+            reason: 'max executions reached',
+            isDue: true, // contract's raw (misleading) value
+            nextExecutionTime: 0n, // epoch — the 1970 zombie-timing source
+          }),
+        ),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_agreement')!;
+      const result = await tool.handler({ chain: 'baseSepolia', account: MOCK_SMART_ACCOUNT, agreementId: 0 });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.status).toBe('completed');
+      expect(parsed.data.isDue).toBe(false);
+      expect(parsed.data.nextExecutionTime).toBe('N/A');
+      expect(parsed.data.canExecute).toBe(false);
+    });
+
+    it('reports lastExecutedAt=null for a never-executed agreement (M3)', async () => {
+      // executionCount=0 is the "never executed" signal; the contract still seeds
+      // lastExecuted with the creation time, so it must NOT surface as a last-execution.
+      const agreement = mockAgreement({ executionCount: 0n });
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(
+          mockAgreementData(agreement, {
+            executable: true,
+            reason: '',
+            isDue: false,
+            nextExecutionTime: BigInt(Math.floor(Date.now() / 1000) + 45),
+          }),
+        ),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_agreement')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        account: MOCK_SMART_ACCOUNT,
+        agreementId: 0,
+      });
+
+      const { parsed } = parseResult(result);
+      expect(parsed.data.executionCount).toBe('0');
+      expect(parsed.data.lastExecutedAt).toBeNull();
     });
 
     it('returns error for non-existent agreement', async () => {

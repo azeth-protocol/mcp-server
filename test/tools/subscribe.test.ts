@@ -126,6 +126,8 @@ describe('azeth_subscribe_service', () => {
       expect(parsed.data.subscription.payee).toBe('0x2222222222222222222222222222222222222222');
       expect(parsed.data.subscription.intervalSeconds).toBe(86400);
       expect(parsed.data.subscription.maxExecutions).toBe(30);
+      // A1: human-readable amount alongside the raw 6-decimal integer
+      expect(parsed.data.subscription.amountPerIntervalFormatted).toBe('0.005 USDC');
 
       expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith({
         payee: '0x2222222222222222222222222222222222222222',
@@ -223,6 +225,7 @@ describe('azeth_subscribe_service', () => {
         expect.objectContaining({ totalCap: 1825000n }),
       );
       expect(parsed.data.subscription.totalCap).toBe('1825000');
+      expect(parsed.data.subscription.totalCapFormatted).toBe('1.825 USDC'); // A1
     } finally {
       globalThis.fetch = originalFetch;
     }
