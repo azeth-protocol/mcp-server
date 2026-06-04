@@ -117,8 +117,8 @@ async function validateExternalUrl(urlStr: string): Promise<ValidatedUrl> {
   // F-9 / C-1 / HIGH-7: Resolve the hostname and reject any private/reserved address
   // (DNS-rebinding / alternative-encoding bypasses), checking BOTH A and AAAA records.
   //
-  // Resolve via getaddrinfo (dns.lookup) — the SAME resolver fetch()/the actual
-  // connection uses — NOT dns.resolve4/6 (c-ares direct nameserver queries). c-ares
+  // Resolve via getaddrinfo (dns.lookup) — the SAME resolver the HTTP client and the
+  // actual connection use — NOT dns.resolve4/6 (c-ares direct nameserver queries). c-ares
   // spuriously fails in restricted-DNS / sandboxed environments where getaddrinfo (and
   // therefore the request itself) succeeds, and it can resolve differently than the
   // connection (a TOCTOU gap). `{ all: true }` returns every A and AAAA record at once.

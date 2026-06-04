@@ -1,4 +1,5 @@
 import type { AzethKit } from '@azeth/sdk';
+import { secureFetch } from '@azeth/sdk';
 import { AzethError, AZETH_CONTRACTS, ERC8004_REGISTRY, RPC_ENV_KEYS, SUPPORTED_CHAINS, type SupportedChainName } from '@azeth/common';
 import { TrustRegistryModuleAbi, AzethOracleAbi, AzethFactoryAbi } from '@azeth/common/abis';
 import { validateAddress, resolveChain, resolveViemChain } from './client.js';
@@ -220,7 +221,11 @@ export async function resolveAddress(
   let matches: Array<{ tokenId: string; owner: string; name: string; capabilities: string[] }>;
 
   try {
-    const response = await fetch(`${serverUrl}/api/v1/registry/discover?${queryParams}`, {
+    // Route through the SDK's secureFetch (no guard → transparent passthrough) so all
+    // mcp-server outbound HTTP lives in the SDK's single audited network module rather than a
+    // direct globalThis.fetch here. The target is the trusted, operator-configured server
+    // (AZETH_SERVER_URL) which must allow localhost in dev — so NO SSRF guard is applied.
+    const response = await secureFetch(`${serverUrl}/api/v1/registry/discover?${queryParams}`, {
       signal: AbortSignal.timeout(10_000),
     });
 
