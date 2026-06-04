@@ -6,6 +6,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AzethError, AZETH_CONTRACTS, TOKENS, formatTokenAmount } from '@azeth/common';
 import type { AzethKit } from '@azeth/sdk';
+import { secureFetch, type SecureFetchGuard } from '@azeth/sdk';
 import { createClient, resolveChain, validateAddress } from '../utils/client.js';
 import { resolveAddress } from '../utils/resolve.js';
 import { success, error, handleError, guardianRequiredError } from '../utils/response.js';
@@ -174,6 +175,66 @@ async function validateExternalUrl(urlStr: string): Promise<ValidatedUrl> {
   return { url: urlStr, pinnedIPv4 };
 }
 
+/** Lazily load undici's `Agent` (an OPTIONAL dependency). undici is Node's built-in HTTP
+ *  engine, but it must be installed as a package to construct a custom connection
+ *  dispatcher. If unavailable, the connection pin is skipped — validate + redirect-refusal
+ *  still apply (graceful degradation). */
+let agentCtorPromise: Promise<(new (opts: unknown) => unknown) | undefined> | undefined;
+function loadAgentCtor(): Promise<(new (opts: unknown) => unknown) | undefined> {
+  if (!agentCtorPromise) {
+    // `as string` keeps this a runtime-only dynamic import so the build does not require
+    // undici's type declarations to be present.
+    agentCtorPromise = import('undici' as string)
+      .then((m: { Agent?: new (opts: unknown) => unknown }) => m.Agent)
+      .catch(() => undefined);
+  }
+  return agentCtorPromise;
+}
+
+/** Build a connection dispatcher pinned to the already-validated public IPv4 address(es).
+ *  Closes the DNS-rebinding TOCTOU: after validateExternalUrl confirms the host resolves to
+ *  public IPs, the actual connection is pinned to those IPs and cannot be re-resolved to a
+ *  private target. TLS SNI / certificate validation still uses the URL hostname. Returns
+ *  undefined when there is nothing to pin (e.g. IPv6-only host) or undici is unavailable —
+ *  the request then proceeds with validate-only protection. (F9) */
+/** A net.LookupFunction-compatible resolver that pins DNS resolution to the given
+ *  already-validated public IPv4 address(es), ignoring the hostname. This is what makes
+ *  the connection immune to DNS rebinding: no matter what an attacker-controlled DNS
+ *  record returns at connect time, the socket only ever connects to the pre-validated IPs.
+ *  Supports both the single-address and `{ all }` callback forms. Exported for tests. (F9) */
+export function createPinnedLookup(
+  pinnedIPv4: string[],
+): (
+  hostname: string,
+  opts: { all?: boolean } | undefined,
+  cb: (err: Error | null, address: unknown, family?: number) => void,
+) => void {
+  return (_hostname, opts, cb): void => {
+    if (opts?.all) cb(null, pinnedIPv4.map((address) => ({ address, family: 4 })));
+    else cb(null, pinnedIPv4[0], 4);
+  };
+}
+
+async function buildPinnedDispatcher(pinnedIPv4: string[]): Promise<unknown | undefined> {
+  if (pinnedIPv4.length === 0) return undefined;
+  const AgentCtor = await loadAgentCtor();
+  if (!AgentCtor) return undefined;
+  try {
+    return new AgentCtor({ connect: { lookup: createPinnedLookup(pinnedIPv4) } });
+  } catch {
+    return undefined;
+  }
+}
+
+/** SSRF guard injected into the SDK's secureFetch for untrusted URLs (x402 targets,
+ *  registry-discovered endpoints): validates the URL (HTTPS, non-private/reserved IP,
+ *  DNS-resolvable) and returns a connection dispatcher pinned to the validated IPs.
+ *  Throws (AzethError) to BLOCK the request. (F9) */
+const secureGuard: SecureFetchGuard = async (urlStr: string) => {
+  const validated = await validateExternalUrl(urlStr);
+  return { dispatcher: await buildPinnedDispatcher(validated.pinnedIPv4) };
+};
+
 /**
  * Apply smart account selection from the `smartAccount` tool parameter.
  * Accepts "#N" (1-based index from azeth_accounts) or a full address.
@@ -278,6 +339,8 @@ export function registerPaymentTools(server: McpServer): void {
           method: args.method,
           body: args.body,
           maxAmount,
+          // Validate + pin every connection hop and refuse credential-carrying redirects. (F9)
+          secureGuard,
         });
 
         // F-5/H-1: Stream response body with size limit. Uses Uint8Array chunks
@@ -430,6 +493,10 @@ export function registerPaymentTools(server: McpServer): void {
           maxAmount,
           minReputation: args.minReputation,
           autoFeedback: args.autoFeedback ?? false,
+          // SSRF guard for discovered (third-party-published) endpoints — validates + pins
+          // every connection hop, the same protection azeth_pay applies to user URLs.
+          // Throwing makes smartFetch402 skip that service and try the next one. (F9)
+          secureGuard,
         });
 
         // Stream response body with size limit (same pattern as azeth_pay)
@@ -721,10 +788,13 @@ export function registerPaymentTools(server: McpServer): void {
       try {
         client = await createClient(args.chain);
 
-        // Fetch the URL to get 402 response with agreement terms
-        const response = await fetch(validated.url, {
+        // Fetch the URL to get the 402 response with agreement terms. Untrusted URL →
+        // validate + pin the connection and refuse redirects (no credential leakage). (F9)
+        const response = await secureFetch(validated.url, {
           method: 'GET',
           signal: AbortSignal.timeout(15_000),
+          guard: secureGuard,
+          guardedRedirect: 'error',
         });
 
         if (response.status !== 402) {

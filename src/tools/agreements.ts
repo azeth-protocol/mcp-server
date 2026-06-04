@@ -336,8 +336,24 @@ export function registerAgreementTools(server: McpServer): void {
           // Receipt fetch failed — fall back to delta approach below
         }
 
-        // Enrich response with post-execution state
-        const agreement = await client.getAgreement(agreementId, account);
+        // Enrich response with post-execution state.
+        // F2: guard against a read-after-write race. A load-balanced RPC node can serve
+        // this getAgreement from a block that predates the just-mined UserOp, returning
+        // stale executionCount / totalPaid / remainingBudget (the on-chain state is
+        // correct; only this read lagged). When a payment was made (executionAmount > 0)
+        // but the read's totalPaid hasn't advanced to include it, re-read with a short
+        // backoff until the node reflects this execution — fixing all derived fields atomically.
+        let agreement = await client.getAgreement(agreementId, account);
+        if (executionAmount > 0n) {
+          for (
+            let attempt = 0;
+            attempt < 5 && agreement.totalPaid < preExecutionTotal + executionAmount;
+            attempt++
+          ) {
+            await new Promise((resolve) => setTimeout(resolve, 300));
+            agreement = await client.getAgreement(agreementId, account);
+          }
+        }
         const decimals = tokenDecimals(agreement.token, chain);
         const tokenSymbol = resolveTokenSymbol(agreement.token, chain);
         const now = BigInt(Math.floor(Date.now() / 1000));

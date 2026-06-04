@@ -286,10 +286,16 @@ export function guardianRequiredError(
     }
   }
 
-  return {
-    content: [{ type: 'text', text: lines.join('\n') }],
-    isError: true,
-  };
+  // Return through the structured error envelope (matching every other tool error)
+  // so agents can branch on error.code. The multi-line remediation guidance is
+  // preserved verbatim in error.suggestion. (F7: previously returned as plain text.)
+  const [headline, ...rest] = lines;
+  const guidance = rest.join('\n').trim();
+  return error(
+    'GUARDIAN_COSIGN_REQUIRED',
+    headline ?? `Guardian co-signature required: ${reason}`,
+    guidance.length > 0 ? guidance : undefined,
+  );
 }
 
 /** JSON replacer that converts bigint values to strings */

@@ -189,11 +189,13 @@ describe('payment tools', () => {
 
       expect(mockClient.fetch402).toHaveBeenCalledWith(
         'https://api.example.com/submit',
-        {
+        expect.objectContaining({
           method: 'POST',
           body: '{"key": "value"}',
           maxAmount: undefined,
-        },
+          // F9: azeth_pay injects an SSRF guard (validate + connection pin + redirect policy)
+          secureGuard: expect.any(Function),
+        }),
       );
     });
 

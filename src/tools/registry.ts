@@ -97,7 +97,21 @@ async function overlayMetadataUpdates(
       if (raw && raw !== '0x') {
         const decoded = hexToString(raw);
         if (decoded) {
-          entry[key] = decoded;
+          if (key === 'capabilities') {
+            // capabilities is a list-valued field; setMetadata stores it on-chain as a
+            // JSON-array STRING. Parse it back to an array so the single-entry get-path
+            // matches the list endpoint and the documented RegistryEntry.capabilities:
+            // string[] type. On malformed input, keep the existing (server-provided)
+            // array rather than overwrite it with a raw string. (F1: type inconsistency.)
+            try {
+              const parsed: unknown = JSON.parse(decoded);
+              if (Array.isArray(parsed)) {
+                entry[key] = parsed.filter((c): c is string => typeof c === 'string');
+              }
+            } catch { /* leave existing capabilities array intact */ }
+          } else {
+            entry[key] = decoded;
+          }
         }
       }
     } catch { /* no metadata for this key */ }
