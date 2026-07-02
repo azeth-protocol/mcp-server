@@ -159,13 +159,26 @@ function getSuggestion(code: string, details?: Record<string, unknown>): string 
         const aaHints: Record<string, string> = {
           AA21: 'AA21 — account does not exist or is not deployed. Use azeth_create_account first.',
           AA23: 'AA23 — gas estimation failed (possible overflow or contract revert). Check transaction parameters.',
-          AA24: 'AA24 — signature validation failed. Check that the signer matches the account owner.',
+          AA24: 'AA24 — signature validation failed. Check that the signer matches the account owner. Note: batch executions and guardrail changes always require a guardian co-signature (self-guardian accounts co-sign automatically; a distinct guardian needs AZETH_GUARDIAN_KEY + AZETH_GUARDIAN_AUTO_SIGN=true or XMTP approval).',
           AA25: 'AA25 — invalid nonce. The account nonce may be out of sync — retry the operation.',
           AA26: 'AA26 — verificationGasLimit too low. The operation requires more gas than estimated. Retry the operation.',
         };
         return aaHints[aaCode] ?? `ERC-4337 error ${aaCode}. Check bundler logs for details.`;
       }
       return 'On-chain contract execution failed. Check the error details for the specific revert reason.';
+    }
+    case 'PROOF_INVALID': {
+      const reason = details?.reason as string | undefined;
+      switch (reason) {
+        case 'ZERO_DELTA':
+          return "The pair's transferDeltaUSD is zero at the current anchor block — zero values cannot be proven (exclusion proofs unsupported). Make/receive payments on the L2, then retry once a newer anchor is posted.";
+        case 'ALREADY_PROVEN':
+          return 'This pair is already proven at the current anchor height. Re-prove only after the rollup posts a newer anchor.';
+        case 'ANCHOR_MISMATCH':
+          return 'L2 RPC data does not hash to the L1 anchor root. Use a canonical archive RPC and verify gameType.';
+        default:
+          return 'Regenerate the storage proof against the latest anchor state root posted to L1; verify the chainId is registered and active on TrustL2Reader.';
+      }
     }
     case 'ACCOUNT_NOT_FOUND':
       return 'No account with that name or address was found. Use azeth_accounts to list your accounts, or azeth_discover_services to find registered participants.';
@@ -178,6 +191,7 @@ function getSuggestion(code: string, details?: Record<string, unknown>): string 
         }
         return 'XMTP messaging is unavailable. Verify XMTP_ENV and XMTP_ENCRYPTION_KEY are set correctly.';
       }
+      if (cause === 'archive') return 'The L2 RPC does not serve eth_getProof at the anchor block (~7 days old). Set AZETH_ARCHIVE_RPC_URL_BASE_SEPOLIA to a true archive endpoint (Alchemy/QuickNode).';
       if (cause === 'dns') return 'DNS resolution failed. Check your network connection and verify the hostname is correct.';
       if (cause === 'server') return 'Azeth server is unreachable. Check AZETH_SERVER_URL or retry later.';
       if (cause === 'bundler') return 'ERC-4337 bundler is unreachable. Check PIMLICO_API_KEY or AZETH_BUNDLER_URL settings.';
@@ -204,6 +218,24 @@ function getSuggestion(code: string, details?: Record<string, unknown>): string 
     default:
       return undefined;
   }
+}
+
+/** Maximum unix-seconds timestamp representable by a JS Date (8.64e15 ms / 1000). */
+const MAX_DATE_EPOCH_SECONDS = 8_640_000_000_000;
+
+/** Format a unix-seconds timestamp as an ISO-8601 string WITHOUT ever throwing.
+ *
+ *  `new Date(secs * 1000).toISOString()` throws RangeError beyond ±8.64e12 seconds,
+ *  and on-chain uint256 timestamps (e.g. a PaymentAgreement endTime created by a
+ *  non-MCP client) can exceed that. A tool that has already landed a transaction —
+ *  or is merely READING chain state — must never report failure because a stored
+ *  timestamp is absurd; fall back to the raw seconds value instead. */
+export function safeIso(epochSeconds: number | bigint): string {
+  const secs = typeof epochSeconds === 'bigint' ? Number(epochSeconds) : epochSeconds;
+  if (!Number.isFinite(secs) || Math.abs(secs) > MAX_DATE_EPOCH_SECONDS) {
+    return `unrepresentable (${epochSeconds.toString()} seconds since epoch)`;
+  }
+  return new Date(secs * 1000).toISOString();
 }
 
 /** Format a bigint 18-decimal USD amount with adaptive precision.
@@ -267,6 +299,9 @@ export function guardianRequiredError(
     lines.push('3. Split into smaller transactions within your standard limits');
   } else {
     // No guardian key at all
+    lines.push('Note: self-guardian accounts (guardian == owner) co-sign automatically — seeing this');
+    lines.push('error means your account has a DISTINCT guardian address that must approve.');
+    lines.push('');
     lines.push('How to resolve:');
     lines.push('');
     lines.push('Option 1 (recommended): Set AZETH_GUARDIAN_KEY + AZETH_GUARDIAN_AUTO_SIGN=true');

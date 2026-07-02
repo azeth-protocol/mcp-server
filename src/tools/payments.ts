@@ -11,7 +11,7 @@ import { secureFetch, createDefaultSsrfGuard, validateExternalUrl, type Validate
 export { createPinnedLookup } from '@azeth/sdk';
 import { createClient, resolveChain, validateAddress } from '../utils/client.js';
 import { resolveAddress } from '../utils/resolve.js';
-import { success, error, handleError, guardianRequiredError } from '../utils/response.js';
+import { success, error, handleError, guardianRequiredError, safeIso } from '../utils/response.js';
 
 /** Maximum response body size returned to the MCP caller (100 KB) */
 const MAX_RESPONSE_SIZE = 100_000;
@@ -19,6 +19,20 @@ const MAX_RESPONSE_SIZE = 100_000;
 /** Single audited SSRF guard for untrusted outbound HTTP (x402 targets + registry-discovered
  *  endpoints), shared with the SDK client methods. (F9/F11) */
 const secureGuard = createDefaultSsrfGuard();
+
+/** Mirrors MAX_ACCRUAL_MULTIPLIER in PaymentAgreementModule.sol:40 — pro-rata accrual pays at
+ *  most 3 elapsed intervals per execution, so the implicit worst-case payout of a count-capped
+ *  agreement is amount × maxExecutions × 3. (C3: kept as a local constant because @azeth/common
+ *  is outside this change set; promote to a shared constant when ABI generation can mirror it.) */
+const MAX_ACCRUAL_MULTIPLIER = 3n;
+
+/** Upper bound for a createPaymentAgreement endTime: 100 years from now, in seconds.
+ *  Far below the JS Date representable limit (8.64e12 s), so any endTime that passes
+ *  pre-flight can be ISO-formatted in the success response and every read path — a
+ *  successful on-chain create can never be reported as a failure by a RangeError in
+ *  response formatting (which would bait a duplicate-creating retry). Also catches
+ *  agents passing millisecond/microsecond/nanosecond timestamps (all >> 100y in seconds). */
+const MAX_END_TIME_HORIZON_SECONDS = 100 * 365 * 86_400;
 
 
 /**
@@ -90,7 +104,7 @@ export function registerPaymentTools(server: McpServer): void {
         'The tool automatically detects if you have an active payment agreement (subscription) with the service.',
         'If an agreement exists, access is granted without additional payment. Otherwise, a fresh USDC payment is signed.',
         '',
-        'Returns: Whether payment was made, the payment method used ("smart-account" for a fresh smart-account settlement, "session" for SIWx-granted access incl. an active agreement, "x402" for a direct EOA settlement, or "none"), the HTTP status, and the response body.',
+        'Returns: Whether payment was made, the payment method used ("smart-account" for a fresh smart-account settlement, "agreement" for access granted by an active on-chain payment agreement, "session" for SIWx reuse of a prior payment session (older servers may also report agreement-granted access as "session"), "x402" for a direct EOA settlement, or "none"), the HTTP status, and the response body.',
         '',
         'Note: Requires USDC balance to pay (unless an agreement grants access). Set maxAmount to cap spending.',
         'Only HTTPS URLs to public endpoints are accepted. The payer account is determined by the AZETH_PRIVATE_KEY environment variable.',
@@ -426,13 +440,19 @@ export function registerPaymentTools(server: McpServer): void {
         '',
         'Use this when: You need automated recurring payments (subscriptions, data feeds, scheduled transfers) between participants.',
         '',
-        'Returns: The agreement ID and creation transaction hash.',
+        'Returns: The agreement ID, creation transaction hash, and the effective totalCap (hard on-chain spend ceiling).',
+        '',
+        'Spend cap (totalCap): the on-chain module accrues payments pro-rata — a single execution can pay up to 3 missed',
+        'intervals — so total payout may exceed amount × maxExecutions. totalCap is a hard on-chain ceiling on total payout.',
+        'If omitted, it defaults to amount × maxExecutions × 3 (today\'s accrual worst case, made explicit and enforced)',
+        'when maxExecutions is set, else amount × 365 (~1 year budget). The response always reports the effective cap.',
         '',
         'Note: This creates an on-chain agreement via the PaymentAgreementModule. The payee or anyone can call execute',
         'once each interval has elapsed. Requires sufficient token balance for each execution.',
         'The payer account is determined by the AZETH_PRIVATE_KEY environment variable.',
         '',
         'Example: { "payee": "Alice", "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "amount": "1.00", "intervalSeconds": 86400 }',
+        'Example with caps: { "payee": "Alice", "token": "0x036CbD53842c5426634e7929541eC2318f3dCF7e", "amount": "0.50", "intervalSeconds": 3600, "maxExecutions": 3, "totalCap": "1.50" }',
       ].join('\n'),
       inputSchema: z.object({
         chain: z.string().optional().describe('Target chain. Defaults to AZETH_CHAIN env var or "baseSepolia". Accepts "base", "baseSepolia", "ethereumSepolia", "ethereum" (and aliases like "base-sepolia", "eth-sepolia", "sepolia", "eth", "mainnet").'),
@@ -441,6 +461,8 @@ export function registerPaymentTools(server: McpServer): void {
         amount: z.string().describe('Payment amount per interval in human-readable units (e.g., "10.00" for 10 USDC).'),
         intervalSeconds: z.coerce.number().int().describe('Time between payments in seconds (minimum 60). E.g., 86400 for daily, 604800 for weekly.'),
         maxExecutions: z.coerce.number().int().optional().describe('Maximum number of payments. 0 or omit for unlimited.'),
+        totalCap: z.string().max(32).optional().describe('Maximum total payout across all executions, in human-readable token units (e.g., "1.50"). Hard on-chain cap. Defaults to amount × maxExecutions × 3 when maxExecutions is set (3 = on-chain accrual worst case), else amount × 365.'),
+        endTime: z.coerce.number().int().optional().describe('Unix timestamp in SECONDS (not ms) after which the agreement expires. Must be at least now + intervalSeconds (the chain rejects agreements that expire before their first execution) and within 100 years. Omit for no time limit.'),
         decimals: z.coerce.number().int().min(0).max(18).optional().describe('Token decimals. Defaults to 6 (USDC). Use 18 for WETH or native ETH.'),
       }),
     },
@@ -479,6 +501,56 @@ export function registerPaymentTools(server: McpServer): void {
           return error('INVALID_INPUT', 'Invalid amount format — must be a valid decimal number (e.g., "10.00")');
         }
 
+        // C3: hard cap on total payout, enforced on-chain by the PaymentAgreementModule.
+        let totalCap: bigint | undefined;
+        if (args.totalCap !== undefined) {
+          try {
+            totalCap = parseUnits(args.totalCap, decimals); // tool's decimals, NOT hard-coded 6
+          } catch {
+            return error('INVALID_INPUT', 'Invalid totalCap format — must be a valid decimal number (e.g., "1.50")');
+          }
+          if (totalCap <= 0n) {
+            return error('INVALID_INPUT', 'totalCap must be greater than 0.', 'Omit totalCap to use the default cap.');
+          }
+        }
+        if (args.endTime !== undefined) {
+          const nowSecs = Math.floor(Date.now() / 1000);
+          if (args.endTime <= nowSecs) {
+            return error('INVALID_INPUT', 'endTime must be a future unix timestamp in seconds.');
+          }
+          // The on-chain module requires endTime >= block.timestamp + interval
+          // (PaymentAgreementModule rejects agreements that would expire before their
+          // first possible execution) — catch it here instead of burning a UserOp on a
+          // guaranteed revert that decodes misleadingly as "already cancelled or completed".
+          if (args.endTime < nowSecs + args.intervalSeconds) {
+            return error(
+              'INVALID_INPUT',
+              `endTime must allow at least one full interval: endTime >= now + intervalSeconds (>= ${nowSecs + args.intervalSeconds}).`,
+              'An agreement that expires before its first execution is rejected on-chain. Increase endTime or shorten intervalSeconds.',
+            );
+          }
+          // Upper bound (100 years): keeps every later Date conversion representable, so a
+          // SUCCESSFUL on-chain create can never be reported as a failure by response
+          // formatting — which would bait a retry into minting a duplicate recurring
+          // authorization. Millisecond/microsecond/nanosecond timestamps all land here.
+          if (args.endTime > nowSecs + MAX_END_TIME_HORIZON_SECONDS) {
+            return error(
+              'INVALID_INPUT',
+              'endTime must be within 100 years from now.',
+              'endTime is a unix timestamp in SECONDS — did you pass milliseconds (or microseconds/nanoseconds)?',
+            );
+          }
+        }
+        if (totalCap === undefined && args.maxExecutions && args.maxExecutions > 0) {
+          // C3 default: pro-rata accrual can pay up to MAX_ACCRUAL_MULTIPLIER intervals per
+          // execution, so amount × maxExecutions × 3 is today's implicit worst case — made
+          // explicit here and enforced on-chain instead of being an unbounded surprise.
+          totalCap = amount * BigInt(args.maxExecutions) * MAX_ACCRUAL_MULTIPLIER;
+        }
+        // Effective cap for display: with neither cap set, the SDK defaults totalCap to
+        // amount × 365 (~1 year budget) — surface that so the ceiling is never silent.
+        const effectiveTotalCap = totalCap ?? amount * 365n;
+
         // Pre-flight: verify the token is whitelisted by the guardian module
         try {
           const chain = resolveChain(args.chain);
@@ -510,6 +582,8 @@ export function registerPaymentTools(server: McpServer): void {
           amount,
           interval: args.intervalSeconds,
           maxExecutions: args.maxExecutions,
+          totalCap,
+          endTime: args.endTime !== undefined ? BigInt(args.endTime) : undefined,
         });
 
         // Resolve token symbol for display
@@ -555,6 +629,17 @@ export function registerPaymentTools(server: McpServer): void {
               intervalSeconds: args.intervalSeconds,
               intervalHuman,
               maxExecutions: args.maxExecutions ?? 0,
+              // C3: ALWAYS display the effective hard cap so "amount × count" can never be
+              // silently exceeded by on-chain pro-rata accrual.
+              totalCap: effectiveTotalCap.toString(),
+              totalCapFormatted: `${formatTokenAmount(effectiveTotalCap, decimals)} ${tokenSymbol}`,
+              totalCapSource: args.totalCap !== undefined ? 'explicit' : 'default',
+              // safeIso: this runs AFTER the agreement landed on-chain — formatting must
+              // never throw here (pre-flight bounds endTime, this is defense in depth).
+              ...(args.endTime !== undefined
+                ? { endTime: args.endTime, endTimeISO: safeIso(args.endTime) }
+                : {}),
+              capNote: 'Hard on-chain spend ceiling. Pro-rata accrual can pay up to 3 missed intervals per execution, so total payout may exceed amount × maxExecutions — but never totalCap.',
             },
           },
           { txHash: result.txHash },

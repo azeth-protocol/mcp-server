@@ -7,6 +7,7 @@ import { registerPaymentTools } from './tools/payments.js';
 import { registerAgreementTools } from './tools/agreements.js';
 import { registerRegistryTools } from './tools/registry.js';
 import { registerReputationTools } from './tools/reputation.js';
+import { registerCrosschainTools } from './tools/crosschain.js';
 import { registerMessagingTools } from './tools/messaging.js';
 import { registerGuardianTools } from './tools/guardian.js';
 import { registerGuardianApprovalTools } from './tools/guardian-approval.js';
@@ -38,6 +39,7 @@ function createServer(): McpServer {
   registerAgreementTools(rateLimitedServer);
   registerRegistryTools(rateLimitedServer);
   registerReputationTools(rateLimitedServer);
+  registerCrosschainTools(rateLimitedServer);
   registerMessagingTools(rateLimitedServer);
   registerGuardianTools(rateLimitedServer);
   registerGuardianApprovalTools(rateLimitedServer);

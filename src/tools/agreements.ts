@@ -6,7 +6,7 @@ import { TOKENS, type SupportedChainName } from '@azeth/common';
 import { PaymentAgreementModuleAbi } from '@azeth/common/abis';
 import { createClient, resolveChain } from '../utils/client.js';
 import { resolveAddress, resolveSmartAccount } from '../utils/resolve.js';
-import { success, error, handleError, formatUSD, guardianRequiredError } from '../utils/response.js';
+import { success, error, handleError, formatUSD, guardianRequiredError, safeIso } from '../utils/response.js';
 
 // ──────────────────────────────────────────────
 // Shared formatting utilities
@@ -481,8 +481,6 @@ export function registerAgreementTools(server: McpServer): void {
         const chain = resolveChain(args.chain);
 
         // Resolve to the caller's OWN smart account (not arbitrary addresses).
-        // Only the payer can cancel their own agreements — resolveSmartAccount
-        // restricts resolution to accounts owned by the caller's private key.
         let account: `0x${string}`;
         if (args.smartAccount) {
           try {
@@ -497,6 +495,19 @@ export function registerAgreementTools(server: McpServer): void {
           }
         } else {
           account = await client.resolveSmartAccount();
+        }
+
+        // OWNERSHIP GATE: resolveSmartAccount passes raw addresses through unchecked,
+        // so a foreign account address would reach the signing path and die with a
+        // misleading guardian-co-signature error (the chain rejects it regardless —
+        // this check exists for error quality, not security). Only the payer can cancel.
+        const ownedAccounts = await client.getSmartAccounts();
+        if (!ownedAccounts.some((a) => a.toLowerCase() === account.toLowerCase())) {
+          return error(
+            'UNAUTHORIZED',
+            `Smart account ${account} is not owned by your key — only the payer (agreement creator) can cancel an agreement.`,
+            'Use azeth_accounts to list your own accounts. To stop receiving payments as a payee, contact the payer or simply stop providing the service.',
+          );
         }
 
         const agreementId = BigInt(args.agreementId);
@@ -620,7 +631,7 @@ export function registerAgreementTools(server: McpServer): void {
         // schedules from creation), so lastExecuted is never 0n even before any execution.
         const lastExecutedAt = agreement.executionCount === 0n
           ? null
-          : new Date(Number(agreement.lastExecuted) * 1000).toISOString();
+          : safeIso(agreement.lastExecuted);
 
         let nextExecutionTime: string;
         let nextExecutionIn: string;
@@ -632,7 +643,9 @@ export function registerAgreementTools(server: McpServer): void {
           nextExecutionIn = `N/A (${status})`;
           isDue = false;
         } else {
-          nextExecutionTime = new Date(Number(nextExecTime) * 1000).toISOString();
+          // safeIso: read path of ON-CHAIN data — an agreement created by a non-MCP client
+          // can hold a uint256 timestamp beyond the JS Date range; reporting must not throw.
+          nextExecutionTime = safeIso(nextExecTime);
           const nowSecs = Math.floor(Date.now() / 1000);
           const diff = Number(nextExecTime) - nowSecs;
           if (diff <= 0) {
@@ -697,7 +710,7 @@ export function registerAgreementTools(server: McpServer): void {
           lastExecutedAt,
           nextExecutionTime,
           nextExecutionIn,
-          expiresAt: agreement.endTime === 0n ? 'never' : new Date(Number(agreement.endTime) * 1000).toISOString(),
+          expiresAt: agreement.endTime === 0n ? 'never' : safeIso(agreement.endTime),
           // Checks
           isDue,
           canExecute,

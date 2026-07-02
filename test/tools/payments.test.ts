@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { AzethError } from '@azeth/common';
+import { AzethError, formatTokenAmount } from '@azeth/common';
 import { parseUnits } from 'viem';
 import { createMockMcpServer, TEST_PRIVATE_KEY, TEST_ADDRESS, TEST_USDC_ADDRESS, MOCK_SMART_ACCOUNT } from '../helpers.js';
 import { registerPaymentTools } from '../../src/tools/payments.js';
@@ -253,6 +253,33 @@ describe('payment tools', () => {
       const { parsed } = parseResult(result);
       expect(parsed.data.amount).toBe('10000');
       expect(parsed.data.amountFormatted).toBe('0.01 USDC');
+    });
+
+    it('surfaces paymentMethod "agreement" when the SDK reports agreement-granted access (F4)', async () => {
+      const mockResponse = mockResponseWithBody('{"price":1777}', 200);
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        fetch402: vi.fn().mockResolvedValue({
+          paymentMade: false, // access granted by the on-chain agreement — no fresh settlement
+          amount: undefined,
+          paymentMethod: 'agreement',
+          response: mockResponse,
+        }),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_pay')!;
+      const result = await tool.handler({
+        privateKey: TEST_PRIVATE_KEY,
+        chain: 'baseSepolia',
+        url: 'https://api.example.com/data',
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBeUndefined();
+      expect(parsed.data.paid).toBe(false);
+      expect(parsed.data.paymentMethod).toBe('agreement');
     });
 
     it('handles when no payment was required', async () => {
@@ -541,6 +568,9 @@ describe('payment tools', () => {
         amount: parseUnits('0.01', 18),
         interval: 604800,
         maxExecutions: 12,
+        // C3: count cap without explicit totalCap → default hard cap amount × maxExecutions × 3
+        totalCap: parseUnits('0.01', 18) * 12n * 3n,
+        endTime: undefined,
       });
     });
 
@@ -566,6 +596,293 @@ describe('payment tools', () => {
       });
 
       expect(mockClient.destroy).toHaveBeenCalled();
+    });
+
+    // ── C3: totalCap + endTime ────────────────────
+    describe('totalCap and endTime (C3)', () => {
+      function mockAgreementClient() {
+        const mockClient = {
+          address: MOCK_SMART_ACCOUNT,
+          createPaymentAgreement: vi.fn().mockResolvedValue({
+            agreementId: 7n,
+            txHash: '0xcap',
+          }),
+          destroy: vi.fn(),
+        };
+        mockedCreateClient.mockResolvedValue(mockClient as never);
+        return mockClient;
+      }
+
+      it('[REGRESSION C3] without totalCap (maxExecutions=3): defaults totalCap = amount × 3 × 3 and displays the effective cap', async () => {
+        // Live finding: agreement #7 (0.50 USDC × maxExecutions 3) paid 3.699999 USDC via
+        // pro-rata accrual. The default cap makes that implicit ×3 worst case explicit
+        // and on-chain enforced: 0.50 × 3 × 3 = 4.50 USDC.
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'base', // TEST_USDC_ADDRESS is Base-mainnet USDC → symbol resolves to "USDC"
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          maxExecutions: 3,
+        });
+
+        expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith(
+          expect.objectContaining({
+            amount: 500000n,
+            maxExecutions: 3,
+            totalCap: 4500000n, // 0.50 × 3 × 3 (MAX_ACCRUAL_MULTIPLIER)
+          }),
+        );
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBeUndefined();
+        expect(parsed.data.agreement.totalCap).toBe('4500000');
+        expect(parsed.data.agreement.totalCapFormatted).toBe(`${formatTokenAmount(4500000n, 6)} USDC`);
+        expect(parsed.data.agreement.totalCapSource).toBe('default');
+        expect(parsed.data.agreement.capNote).toMatch(/never totalCap/);
+      });
+
+      it('[REGRESSION C3] with explicit totalCap: passes it verbatim and displays it', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'base', // TEST_USDC_ADDRESS is Base-mainnet USDC → symbol resolves to "USDC"
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          maxExecutions: 3,
+          totalCap: '1.50',
+        });
+
+        expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith(
+          expect.objectContaining({
+            maxExecutions: 3,
+            totalCap: 1500000n, // verbatim "1.50", NOT the ×3 default
+          }),
+        );
+
+        const { parsed } = parseResult(result);
+        expect(parsed.data.agreement.totalCap).toBe('1500000');
+        expect(parsed.data.agreement.totalCapFormatted).toBe(`${formatTokenAmount(1500000n, 6)} USDC`);
+        expect(parsed.data.agreement.totalCapSource).toBe('explicit');
+        expect(parsed.data.agreement.capNote).toMatch(/never totalCap/);
+      });
+
+      it('rejects totalCap "0" with INVALID_INPUT', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          totalCap: '0',
+        });
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(parsed.error.code).toBe('INVALID_INPUT');
+        expect(parsed.error.message).toMatch(/totalCap must be greater than 0/);
+        expect(mockClient.createPaymentAgreement).not.toHaveBeenCalled();
+      });
+
+      it('rejects malformed totalCap with INVALID_INPUT', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          totalCap: 'lots-of-money',
+        });
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(parsed.error.code).toBe('INVALID_INPUT');
+        expect(parsed.error.message).toMatch(/Invalid totalCap format/);
+        expect(mockClient.createPaymentAgreement).not.toHaveBeenCalled();
+      });
+
+      it('rejects a past endTime with INVALID_INPUT', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          endTime: Math.floor(Date.now() / 1000) - 60,
+        });
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(parsed.error.code).toBe('INVALID_INPUT');
+        expect(parsed.error.message).toMatch(/endTime must be a future unix timestamp/);
+        expect(mockClient.createPaymentAgreement).not.toHaveBeenCalled();
+      });
+
+      it('[REGRESSION] rejects an endTime beyond 100 years BEFORE creating on-chain (no duplicate-baiting RangeError)', async () => {
+        // Reproduced failure: endTime 9e12 s landed on-chain, then
+        // `new Date(9e12 * 1000).toISOString()` threw RangeError in the SUCCESS response —
+        // the tool reported failure for a successful create and a retry minted a duplicate
+        // recurring authorization. The upper bound must reject it pre-flight.
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          endTime: 9_000_000_000_000, // > Date-representable range when ISO-formatted
+        });
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(parsed.error.code).toBe('INVALID_INPUT');
+        expect(parsed.error.message).toMatch(/within 100 years/);
+        expect(parsed.error.suggestion).toMatch(/SECONDS/);
+        expect(mockClient.createPaymentAgreement).not.toHaveBeenCalled();
+      });
+
+      it('rejects a millisecond endTime (agent passed Date.now()) with the seconds hint', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          endTime: Date.now() + 86_400_000, // milliseconds, not seconds — ~56,000 years away
+        });
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(parsed.error.code).toBe('INVALID_INPUT');
+        expect(parsed.error.message).toMatch(/within 100 years/);
+        expect(mockClient.createPaymentAgreement).not.toHaveBeenCalled();
+      });
+
+      it('rejects an endTime that expires before the first interval (guaranteed on-chain revert)', async () => {
+        // PaymentAgreementModule requires endTime >= block.timestamp + interval; an endTime
+        // in (now, now + interval) previously burned a UserOp on a revert that decoded
+        // misleadingly as "agreement is invalid (already cancelled or completed)".
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          endTime: Math.floor(Date.now() / 1000) + 600, // future, but < now + interval
+        });
+
+        const { parsed, isError } = parseResult(result);
+        expect(isError).toBe(true);
+        expect(parsed.error.code).toBe('INVALID_INPUT');
+        expect(parsed.error.message).toMatch(/at least one full interval/);
+        expect(mockClient.createPaymentAgreement).not.toHaveBeenCalled();
+      });
+
+      it('passes a future endTime to the SDK as bigint and displays it', async () => {
+        const mockClient = mockAgreementClient();
+        const future = Math.floor(Date.now() / 1000) + 86400;
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.50',
+          intervalSeconds: 3600,
+          endTime: future,
+        });
+
+        expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith(
+          expect.objectContaining({ endTime: BigInt(future) }),
+        );
+
+        const { parsed } = parseResult(result);
+        expect(parsed.data.agreement.endTime).toBe(future);
+        expect(parsed.data.agreement.endTimeISO).toBe(new Date(future * 1000).toISOString());
+      });
+
+      it('with neither cap: SDK called without totalCap, response shows the amount × 365 effective cap', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'base', // TEST_USDC_ADDRESS is Base-mainnet USDC → symbol resolves to "USDC"
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '10.00',
+          intervalSeconds: 86400,
+        });
+
+        // The SDK applies its own amount × 365 default — the tool must not invent one here.
+        const callArg = mockClient.createPaymentAgreement.mock.calls[0]![0] as { totalCap?: bigint };
+        expect(callArg.totalCap).toBeUndefined();
+
+        const { parsed } = parseResult(result);
+        const expected = parseUnits('10.00', 6) * 365n;
+        expect(parsed.data.agreement.totalCap).toBe(expected.toString());
+        expect(parsed.data.agreement.totalCapFormatted).toBe(`${formatTokenAmount(expected, 6)} USDC`);
+        expect(parsed.data.agreement.totalCapSource).toBe('default');
+      });
+
+      it('parses totalCap with the tool decimals, not hard-coded 6', async () => {
+        const mockClient = mockAgreementClient();
+
+        const tool = server.tools.get('azeth_create_payment_agreement')!;
+        const result = await tool.handler({
+          privateKey: TEST_PRIVATE_KEY,
+          chain: 'baseSepolia',
+          payee: TEST_ADDRESS,
+          token: TEST_USDC_ADDRESS,
+          amount: '0.01',
+          intervalSeconds: 3600,
+          decimals: 18,
+          totalCap: '0.05',
+        });
+
+        expect(mockClient.createPaymentAgreement).toHaveBeenCalledWith(
+          expect.objectContaining({
+            amount: parseUnits('0.01', 18),
+            totalCap: parseUnits('0.05', 18),
+          }),
+        );
+
+        const { parsed } = parseResult(result);
+        expect(parsed.data.agreement.totalCap).toBe(parseUnits('0.05', 18).toString());
+        expect(parsed.data.agreement.totalCapFormatted).toBe(`${formatTokenAmount(parseUnits('0.05', 18), 18)} TOKEN`);
+      });
     });
   });
 });

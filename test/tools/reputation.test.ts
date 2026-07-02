@@ -26,6 +26,9 @@ vi.mock('viem', async (importOriginal) => {
 vi.mock('viem/chains', () => ({
   base: { id: 8453 },
   baseSepolia: { id: 84532 },
+  // The SDK's client.ts imports these at module scope (cross-chain L1 support)
+  sepolia: { id: 11155111 },
+  mainnet: { id: 1 },
 }));
 
 import { createClient } from '../../src/utils/client.js';

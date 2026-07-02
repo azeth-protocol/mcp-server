@@ -286,6 +286,35 @@ describe('agreement tools', () => {
       expect(mockClient.destroy).toHaveBeenCalled();
     });
 
+    it('rejects cancelling an agreement on a foreign account with UNAUTHORIZED (not a guardian error)', async () => {
+      const FOREIGN = '0x9999999999999999999999999999999999999999';
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreement: vi.fn(),
+        cancelAgreement: vi.fn(),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_cancel_agreement')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        agreementId: 0,
+        smartAccount: FOREIGN,
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBe(true);
+      expect(parsed.error.code).toBe('UNAUTHORIZED');
+      expect(parsed.error.message).toContain('only the payer');
+      // The signing path must never be reached for a foreign account
+      expect(mockClient.cancelAgreement).not.toHaveBeenCalled();
+    });
+
     it('returns error when cancelling already cancelled agreement', async () => {
       const cancelledAgreement = mockAgreement({ active: false, executionCount: 0n });
       const mockClient = {
@@ -387,6 +416,46 @@ describe('agreement tools', () => {
       expect(parsed.data.expiresAt).toBe('never');
       expect(parsed.data.canExecute).toBe(false);
       expect(parsed.data.canExecuteReason).toBe('interval not elapsed');
+      expect(mockClient.destroy).toHaveBeenCalled();
+    });
+
+    it('[REGRESSION] inspects an agreement whose on-chain endTime exceeds the JS Date range instead of throwing RangeError', async () => {
+      // An agreement created with an absurd endTime (e.g. a microsecond timestamp via a
+      // non-MCP client) must remain inspectable: `new Date(9e15 * 1000).toISOString()`
+      // throws RangeError, which previously made azeth_get_agreement fail entirely.
+      const agreement = mockAgreement({ endTime: 9_000_000_000_000_000n }); // 9e15 s — far beyond Date range
+      const nextTime = BigInt(Math.floor(Date.now() / 1000) + 45);
+
+      const mockClient = {
+        address: MOCK_SMART_ACCOUNT,
+        publicClient: { readContract: vi.fn() },
+        addresses: {},
+        getAgreementData: vi.fn().mockResolvedValue(
+          mockAgreementData(agreement, {
+            executable: false,
+            reason: 'interval not elapsed',
+            isDue: false,
+            nextExecutionTime: nextTime,
+          }),
+        ),
+        resolveSmartAccount: vi.fn().mockResolvedValue(MOCK_SMART_ACCOUNT),
+        getSmartAccounts: vi.fn().mockResolvedValue([MOCK_SMART_ACCOUNT]),
+        destroy: vi.fn(),
+      };
+      mockedCreateClient.mockResolvedValue(mockClient as never);
+
+      const tool = server.tools.get('azeth_get_agreement')!;
+      const result = await tool.handler({
+        chain: 'baseSepolia',
+        account: MOCK_SMART_ACCOUNT,
+        agreementId: 0,
+      });
+
+      const { parsed, isError } = parseResult(result);
+      expect(isError).toBeUndefined();
+      expect(parsed.success).toBe(true);
+      expect(parsed.data.status).toBe('active'); // endTime far in the future ⇒ not expired
+      expect(parsed.data.expiresAt).toMatch(/unrepresentable \(9000000000000000 seconds since epoch\)/);
       expect(mockClient.destroy).toHaveBeenCalled();
     });
 

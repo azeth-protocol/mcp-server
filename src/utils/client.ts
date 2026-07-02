@@ -32,6 +32,18 @@ export { resolveViemChain };
  *  stateless — each call gets a fresh client with no shared mutable state, which prevents
  *  cross-request contamination and simplifies error recovery. For production optimization,
  *  a singleton pattern with health-check reconnection could reduce RPC setup overhead per call.
+ *
+ *  N5: per-call statelessness does NOT cause repeated azeth_pay to double-settle —
+ *  prevention is SERVER-side, not client-side. Providers record the verified on-chain
+ *  payer of every settlement (including pre-settled smart-account payments, via
+ *  preSettledPaymentMiddleware → recordPayment) into their SIWx storage keyed by
+ *  resource path, and the SDK attempts a fresh SIWx sign-in on every fetch402 call —
+ *  so a repeat call re-presents the same smart-account identity and is granted access
+ *  with no new settlement, no client state required. (A client-side grant cache was
+ *  tried and removed as behaviorally inert: the server is authoritative and the SIWx
+ *  attempt is already unconditional.) Against a provider deployed before
+ *  payer-recording, the SIWx retry is denied and the client pays again — exact legacy
+ *  behavior until that provider is redeployed.
  */
 export async function createClient(
   chain?: SupportedChainName | string,

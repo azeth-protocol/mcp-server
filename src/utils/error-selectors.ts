@@ -78,6 +78,17 @@ const SELECTOR_MAP: Record<string, ErrorInfo | undefined> = {
   '0xbf16aab6': { name: 'UnsupportedToken', description: 'The oracle does not support this token.' },
   '0xf4d678b8': { name: 'InsufficientBalance', description: 'The smart account has insufficient token balance for this operation.', suggestion: 'Use azeth_deposit to fund your smart account, or use the smartAccount parameter to select a different account. Run azeth_accounts to see all your accounts and their balances.' },
 
+  // TrustL2Reader
+  // ('0xe6c4247b' InvalidAddress() is shared with the Common block below — single entry there.)
+  '0xf25ca59c': { name: 'ChainNotRegistered', description: 'This L2 chain is not registered on TrustL2Reader.', suggestion: 'Only registered L2 chains (e.g. Base Sepolia 84532) can be proven. Registration is owner-only.' },
+  '0x77267b7d': { name: 'ChainNotActive', description: 'This L2 chain is registered but currently inactive on TrustL2Reader.' },
+  '0xfcd46323': { name: 'ChainAlreadyRegistered', description: 'This L2 chain is already registered on TrustL2Reader.' },
+  '0x285c2eea': { name: 'InvalidPairOrdering', description: 'Proof pair must be canonically ordered (account0 < account1).' },
+  '0x09bde339': { name: 'InvalidProof', description: 'The storage proof failed verification against the L1 anchor state root.', suggestion: 'Regenerate the proof against the CURRENT anchor: the anchor may have rotated since the proof was built, or the L2 RPC returned non-canonical data.' },
+  '0x0b78bd4c': { name: 'UnsupportedRollupType', description: 'TrustL2Reader does not support this rollup type.' },
+  '0x464db2f8': { name: 'InvalidBlockHeader', description: 'The RLP block header in the state root proof is invalid.' },
+  '0x0aaac1a5': { name: 'ProofOutdated', description: 'A proof at this or a newer L2 block already exists for this pair.', suggestion: 'The pair is already proven at the current anchor height. Re-prove after the rollup posts a newer anchor.' },
+
   // Common (shared across multiple contracts)
   '0x0dc149f0': { name: 'AlreadyInitialized', description: 'This module is already initialized for the account.' },
   '0x87138d5c': { name: 'NotInitialized', description: 'The account has not been initialized on this module.' },

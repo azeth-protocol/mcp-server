@@ -711,19 +711,20 @@ export function registerRegistryTools(server: McpServer): void {
     'azeth_update_service_batch',
     {
       description: [
-        'Update multiple metadata fields for your registered service in a single transaction.',
+        'Update multiple metadata fields for your registered service in one call.',
         '',
         'Use this when: You need to change several metadata fields at once (e.g., endpoint + description + capabilities).',
-        'This is more gas-efficient than calling azeth_update_service multiple times.',
         '',
         'Supported metadata keys: "endpoint", "description", "capabilities", "name", "entityType", "pricing".',
         'For capabilities, provide a JSON array string (e.g., \'["translation", "nlp"]\').',
         '',
         'Note: Catalogs are off-chain. Update your catalog by updating your endpoint response.',
         '',
-        'Returns: Confirmation with a single transaction hash for all updates.',
+        'Returns: Confirmation with the final transaction hash.',
         '',
-        'Note: All updates are atomic — if one fails, none are applied.',
+        'Note: On the current (v1.3) contracts the updates execute as SEQUENTIAL transactions,',
+        'not atomically — the deployed GuardianModule cannot validate batch UserOperations.',
+        'If an update fails midway, the error reports how many updates already landed.',
         'Maximum 5 key-value pairs per batch.',
         '',
         'Example: { "updates": [{"key": "endpoint", "value": "https://api.example.com/v2"}, {"key": "description", "value": "Updated service"}] }',
@@ -754,7 +755,7 @@ export function registerRegistryTools(server: McpServer): void {
             value: u.value,
           })),
           count: (args.updates as Array<{ key: string; value: string }>).length,
-          message: `${(args.updates as Array<{ key: string; value: string }>).length} metadata field(s) updated in a single transaction.`,
+          message: `${(args.updates as Array<{ key: string; value: string }>).length} metadata field(s) updated (sequential transactions on v1.3; txHash is the final one).`,
         }, { txHash });
       } catch (err) {
         return handleError(err);
